@@ -1,0 +1,63 @@
+# ============================================================================
+# Manim Graph RAG Agent - Docker Compose
+# ============================================================================
+
+version: '3.8'
+
+services:
+  # Main application
+  app:
+    build: .
+    container_name: manim-agent
+    ports:
+      - "8000:8000"
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=${NEO4J_PASSWORD:-password}
+      - CHROMA_PERSIST_DIRECTORY=/app/chroma_db
+      - MANIM_OUTPUT_DIR=/app/output
+    volumes:
+      # Persist generated files
+      - ./output:/app/output
+      # Persist ChromaDB
+      - ./chroma_db:/app/chroma_db
+      # Mount data for indexing
+      - "./extracted data:/app/data:ro"
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    command: ["python", "-m", "src.main", "serve"]
+    networks:
+      - manim-network
+
+  # Neo4j Graph Database
+  neo4j:
+    image: neo4j:5-community
+    container_name: manim-neo4j
+    ports:
+      - "7474:7474"  # HTTP
+      - "7687:7687"  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/${NEO4J_PASSWORD:-password}
+      - NEO4J_PLUGINS=["apoc"]
+      - NEO4J_dbms_security_procedures_unrestricted=apoc.*
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - manim-network
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
+
+networks:
+  manim-network:
+    driver: bridge
