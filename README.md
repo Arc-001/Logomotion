@@ -15,7 +15,16 @@ docker-compose exec app python -m src.main index --data "./extracted data"
 docker-compose exec app python -m src.main generate --prompt "Animate a circle" --output ./output
 ```
 
+
+## Demo
+
+
+
+<video src="assets/output.mp4" controls width="100%"></video>
+
 ## Architecture
+
+![System Architecture](assets/architecture.png)
 
 - **Graph RAG**: Neo4j + ChromaDB hybrid retrieval
 - **Agent**: LangGraph StateGraph workflow
