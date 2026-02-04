@@ -53,7 +53,7 @@ def llm_chat(messages: list[dict], temperature: float = 0.2) -> Optional[str]:
     if not client:
         return None
     
-    model = os.getenv("OPENROUTER_MODEL", "qwen/qwen3-coder:free")
+    model = os.getenv("OPENROUTER_MODEL", "google/gemini-3-flash-preview")
     
     try:
         completion = client.chat.completions.create(
