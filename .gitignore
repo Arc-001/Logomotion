@@ -48,17 +48,10 @@ htmlcov/
 .pytest_cache/
 .mypy_cache/
 
-# Manim output
-media/
-output/
-*.mp4
-*.gif
-*.png
+
 !README.md
 
-# But keep assets folder
-!assets/
-assets/**
+
 
 # ChromaDB
 chroma_db/
