@@ -56,6 +56,10 @@ output/
 *.png
 !README.md
 
+# But keep assets folder
+!assets/
+assets/**
+
 # ChromaDB
 chroma_db/
 
