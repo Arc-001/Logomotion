@@ -113,33 +113,58 @@ Used animations: {', '.join(result.used_animations)}
     finally:
         retriever.close()
     
+    # Calculate target duration in seconds
+    target_seconds = int(state["scene_length"] * 60)
+    
     # Generate code with LLM (OpenRouter)
     prompt = f"""Create a Manim animation based on this request:
 
 **Title:** {state["scene_title"]}
 **Description:** {state["scene_prompt_description"]}
-**Target Length:** {state["scene_length"]} minutes
+**Target Duration:** {target_seconds} seconds ({state["scene_length"]} minutes)
 
-Here are some similar examples from our codebase for reference:
+## CRITICAL REQUIREMENTS:
+
+1. **DURATION**: The video MUST be approximately {target_seconds} seconds long. 
+   - Add sufficient self.wait() calls between animations.
+   - Use run_time=2 or run_time=3 for major animations.
+   - Calculate: you need roughly {target_seconds // 10} major animation sections.
+
+2. **NO OVERLAPPING ELEMENTS**: 
+   - Position title at top using .to_edge(UP)
+   - Position main content in center
+   - Position labels/equations using .next_to() with buff=0.5
+   - FadeOut elements before reusing their screen space
+   - Use LEFT, RIGHT, UP, DOWN to arrange multiple items
+
+3. **TRANSCRIPT FOR AUDIO**: Provide a comprehensive transcript covering the entire video duration.
+
+Here are some reference examples:
 
 {retrieved_context}
 
-Generate complete, working Manim code. Also provide a transcript as a Python dictionary 
-mapping timestamps (in seconds) to text that should be spoken at that time.
+## RESPONSE FORMAT:
 
-Format your response as:
 ```python
 # CODE_START
-<your manim code here>
+from manim import *
+import numpy as np
+
+class YourSceneName(Scene):
+    def construct(self):
+        # Your animation code here
+        pass
 # CODE_END
 ```
 
 ```python
 # TRANSCRIPT_START
 transcript = {{
-    0: "Opening narration...",
-    5: "Next section...",
-    # etc
+    0: "Introduction text spoken at the start...",
+    5: "Explanation of the first concept...",
+    15: "Moving on to the next topic...",
+    30: "Further explanation...",
+    # Add entries every 5-10 seconds covering the full {target_seconds} seconds
 }}
 # TRANSCRIPT_END
 ```
@@ -255,6 +280,7 @@ def code_executor_node(state: VideoGenState) -> dict:
         return {
             "rendered_video_path": str(video_files[0]),
             "error": None,
+            "error_count": 0,  # Reset on success (add 0 keeps current value but marks success)
             "render_logs": render_logs,
             "temp_code_path": str(code_path),
         }
@@ -346,14 +372,19 @@ def transcript_processor_node(state: VideoGenState) -> dict:
     # Sort by timestamp
     sorted_items = sorted(transcript.items(), key=lambda x: float(x[0]))
     
+    print(f"[TTS] Processing {len(sorted_items)} transcript segments...")
+    
     # Try to use Kokoro TTS
     tts = None
     try:
         from ..tts import KokoroTTS, KOKORO_AVAILABLE
         if KOKORO_AVAILABLE:
             tts = KokoroTTS(voice="af_bella")  # American female voice
-    except ImportError:
-        pass
+            print("[TTS] Kokoro TTS initialized successfully")
+        else:
+            print("[TTS] WARNING: Kokoro not available (kokoro-onnx not installed)")
+    except ImportError as e:
+        print(f"[TTS] WARNING: Could not import TTS module: {e}")
     
     for timestamp, text in sorted_items:
         audio_path = None

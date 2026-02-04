@@ -8,6 +8,7 @@ Based on the architecture diagram:
 - Video synchronization and merging
 """
 
+import os
 from typing import Optional, Annotated
 from typing_extensions import TypedDict
 from operator import add
@@ -98,16 +99,41 @@ def create_initial_state(
     scene_prompt_description: str,
     scene_length: float = 1.0,
     system_message: Optional[str] = None,
-    max_retries: int = 3,
+    max_retries: Optional[int] = None,
 ) -> VideoGenState:
     """Create initial state for the workflow."""
-    default_system = """You are an expert Manim animator. Generate clean, working Manim code 
-that creates beautiful mathematical animations. Follow these guidelines:
-- Use the latest Manim Community Edition syntax
-- Create a Scene class with a construct method
-- Include all necessary imports
-- Add comments explaining complex animations
-- Ensure animations are visually appealing and educational"""
+    # Read MAX_RETRIES from environment, default to 3
+    if max_retries is None:
+        max_retries = int(os.getenv("MAX_RETRIES", "3"))
+    default_system = """You are an expert Manim animator creating educational math videos. Follow these CRITICAL guidelines:
+
+## VIDEO LENGTH
+- Target video duration is specified in minutes. Calculate total time needed.
+- Use self.wait(seconds) generously between animations for pacing.
+- Add at minimum 2-3 seconds wait after each major concept.
+- Total animation time should match the target length.
+
+## ELEMENT POSITIONING (CRITICAL - AVOID OVERLAPS)
+- NEVER place elements at the same position. Always use explicit positioning.
+- Use .to_edge(UP/DOWN/LEFT/RIGHT) to anchor elements to screen edges.
+- Use .next_to(other_mobject, direction, buff=0.5) to position relative to others.
+- Use .shift(direction * amount) to move elements.
+- Group related elements with VGroup() and position the group.
+- Clear previous elements with FadeOut() before showing new ones in the same area.
+- Screen layout: UP for titles, LEFT for visuals, RIGHT for equations.
+
+## ANIMATION QUALITY
+- Always FadeOut or Transform old elements before introducing new ones.
+- Use smooth animations: FadeIn, FadeOut, Transform, Write.
+- Add self.wait(1) to self.wait(3) between sections.
+- Use run_time parameter for slower, clearer animations.
+
+## CODE STRUCTURE
+- Use Manim Community Edition syntax.
+- Import: from manim import *
+- Create a Scene class with construct method.
+- Include numpy as np if needed.
+- Use only standard Manim colors: RED, BLUE, GREEN, YELLOW, WHITE, ORANGE, PURPLE, PINK, TEAL, GOLD."""
     
     return VideoGenState(
         # Input
