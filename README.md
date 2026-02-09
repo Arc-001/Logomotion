@@ -20,7 +20,7 @@ docker-compose exec app python -m src.main generate --prompt "Animate a circle" 
 
 
 
-<video src="assets/output.mp4" controls width="100%"></video>
+[Demo](assets/output.mp4)
 
 ## Architecture
 

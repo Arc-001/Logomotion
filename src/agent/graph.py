@@ -121,6 +121,7 @@ async def generate_video(
     scene_title: str,
     scene_prompt_description: str,
     scene_length: float = 1.0,
+    explanation_depth: str = "detailed",
     system_message: str = None,
 ) -> dict:
     """
@@ -130,6 +131,7 @@ async def generate_video(
         scene_title: Title of the scene
         scene_prompt_description: Natural language description
         scene_length: Target length in minutes
+        explanation_depth: Level of detail (basic, detailed, comprehensive)
         system_message: Optional custom system prompt
     
     Returns:
@@ -140,6 +142,7 @@ async def generate_video(
         scene_title=scene_title,
         scene_prompt_description=scene_prompt_description,
         scene_length=scene_length,
+        explanation_depth=explanation_depth,
         system_message=system_message,
     )
     
@@ -156,6 +159,7 @@ def generate_video_sync(
     scene_title: str,
     scene_prompt_description: str,
     scene_length: float = 1.0,
+    explanation_depth: str = "detailed",
     system_message: str = None,
 ) -> dict:
     """Synchronous version of generate_video."""
@@ -165,5 +169,6 @@ def generate_video_sync(
         scene_title=scene_title,
         scene_prompt_description=scene_prompt_description,
         scene_length=scene_length,
+        explanation_depth=explanation_depth,
         system_message=system_message,
     ))

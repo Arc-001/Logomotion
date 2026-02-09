@@ -42,10 +42,16 @@ def cmd_generate(args):
     print(f"Generating video for: {args.prompt}")
     print("-" * 50)
     
+    # Get defaults from environment, CLI overrides
+    default_length = float(os.getenv("VIDEO_LENGTH", "1.0"))
+    explanation_depth = args.depth or os.getenv("EXPLANATION_DEPTH", "detailed")
+    scene_length = args.length if args.length != 1.0 else default_length
+    
     result = generate_video_sync(
         scene_title=args.title or "Generated Scene",
         scene_prompt_description=args.prompt,
-        scene_length=args.length,
+        scene_length=scene_length,
+        explanation_depth=explanation_depth,
     )
     
     # Report results
@@ -126,6 +132,11 @@ def main():
     gen_parser.add_argument(
         "--output", "-o",
         help="Output directory for generated files",
+    )
+    gen_parser.add_argument(
+        "--depth", "-d",
+        choices=["basic", "detailed", "comprehensive"],
+        help="Explanation depth level (default: from .env or 'detailed')",
     )
     
     # Serve command

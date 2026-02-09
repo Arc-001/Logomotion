@@ -21,10 +21,6 @@ try:
 except ImportError:
     chromadb = None
 
-try:
-    from langchain_openai import OpenAIEmbeddings
-except ImportError:
-    OpenAIEmbeddings = None
 
 from .schema import (
     NodeType,
@@ -43,7 +39,6 @@ class IndexerConfig(BaseModel):
     neo4j_user: str = "neo4j"
     neo4j_password: str = "password"
     chroma_persist_dir: str = "./chroma_db"
-    embedding_model: str = "text-embedding-3-small"
     batch_size: int = 100
 
 
@@ -54,7 +49,6 @@ class ManimIndexer:
         self.config = config or IndexerConfig()
         self._neo4j_driver = None
         self._chroma_client = None
-        self._embeddings = None
         self._collection = None
     
     @property
@@ -78,20 +72,22 @@ class ManimIndexer:
         return self._chroma_client
     
     @property
-    def embeddings(self):
-        """Lazy-load embeddings model."""
-        if self._embeddings is None and OpenAIEmbeddings:
-            self._embeddings = OpenAIEmbeddings(model=self.config.embedding_model)
-        return self._embeddings
-    
-    @property
     def collection(self):
-        """Get or create ChromaDB collection."""
+        """Get or create ChromaDB collection with OpenRouter embeddings."""
         if self._collection is None and self.chroma_client:
-            self._collection = self.chroma_client.get_or_create_collection(
-                name="manim_examples",
-                metadata={"description": "Manim code examples with embeddings"}
-            )
+            try:
+                from .embeddings import OpenRouterEmbeddingFunction
+                embedding_fn = OpenRouterEmbeddingFunction(
+                    model="google/gemini-embedding-001"
+                )
+                self._collection = self.chroma_client.get_or_create_collection(
+                    name="manim_examples",
+                    metadata={"description": "Manim code examples with embeddings"},
+                    embedding_function=embedding_fn,
+                )
+            except Exception as e:
+                print(f"OpenRouter embedding failed: {e}")
+                raise
         return self._collection
     
     def close(self):
@@ -267,8 +263,8 @@ class ManimIndexer:
                     MERGE (e)-[:DEMONSTRATES]->(c)
                 """, name=concept, example_id=example_id)
         
-        # Add to ChromaDB with embeddings
-        if self.collection and self.embeddings:
+        # Add to ChromaDB with embeddings (uses ChromaDB's built-in embedding function)
+        if self.collection:
             # Create embedding text (combine prompt and code summary)
             embedding_text = f"Prompt: {prompt}\nScene: {scene_class or 'Unknown'}\nUses: {', '.join(used_classes + used_animations)}"
             

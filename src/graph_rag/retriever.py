@@ -16,10 +16,6 @@ try:
 except ImportError:
     chromadb = None
 
-try:
-    from langchain_openai import OpenAIEmbeddings
-except ImportError:
-    OpenAIEmbeddings = None
 
 
 @dataclass
@@ -49,17 +45,14 @@ class ManimRetriever:
         neo4j_user: str = "neo4j",
         neo4j_password: str = "password",
         chroma_persist_dir: str = "./chroma_db",
-        embedding_model: str = "text-embedding-3-small",
     ):
         self.neo4j_uri = neo4j_uri
         self.neo4j_user = neo4j_user
         self.neo4j_password = neo4j_password
         self.chroma_persist_dir = chroma_persist_dir
-        self.embedding_model = embedding_model
         
         self._neo4j_driver = None
         self._chroma_client = None
-        self._embeddings = None
         self._collection = None
     
     @property
@@ -81,17 +74,21 @@ class ManimRetriever:
         return self._chroma_client
     
     @property
-    def embeddings(self):
-        if self._embeddings is None and OpenAIEmbeddings:
-            self._embeddings = OpenAIEmbeddings(model=self.embedding_model)
-        return self._embeddings
-    
-    @property
     def collection(self):
+        """Get ChromaDB collection with OpenRouter embeddings."""
         if self._collection is None and self.chroma_client:
-            self._collection = self.chroma_client.get_or_create_collection(
-                name="manim_examples"
-            )
+            try:
+                from .embeddings import OpenRouterEmbeddingFunction
+                embedding_fn = OpenRouterEmbeddingFunction(
+                    model="google/gemini-embedding-001"
+                )
+                self._collection = self.chroma_client.get_or_create_collection(
+                    name="manim_examples",
+                    embedding_function=embedding_fn,
+                )
+            except Exception as e:
+                print(f"OpenRouter embedding failed: {e}")
+                raise
         return self._collection
     
     def close(self):

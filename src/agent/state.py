@@ -53,6 +53,7 @@ class VideoGenState(TypedDict):
     scene_title: str
     scene_prompt_description: str
     scene_length: float
+    explanation_depth: str  # "basic", "detailed", or "comprehensive"
     
     # RAG context
     retrieved_examples: list[str]  # Code examples from Graph RAG
@@ -98,6 +99,7 @@ def create_initial_state(
     scene_title: str,
     scene_prompt_description: str,
     scene_length: float = 1.0,
+    explanation_depth: str = "detailed",
     system_message: Optional[str] = None,
     max_retries: Optional[int] = None,
 ) -> VideoGenState:
@@ -141,6 +143,7 @@ def create_initial_state(
         scene_title=scene_title,
         scene_prompt_description=scene_prompt_description,
         scene_length=scene_length,
+        explanation_depth=explanation_depth,
         
         # RAG
         retrieved_examples=[],

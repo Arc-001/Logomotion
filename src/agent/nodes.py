@@ -116,12 +116,34 @@ Used animations: {', '.join(result.used_animations)}
     # Calculate target duration in seconds
     target_seconds = int(state["scene_length"] * 60)
     
+    # Configure based on explanation depth
+    depth_configs = {
+        "basic": {
+            "detail_level": "high-level overview with key points only",
+            "transcript_density": "entries every 10-15 seconds",
+            "animation_style": "quick transitions, minimal pauses",
+        },
+        "detailed": {
+            "detail_level": "step-by-step explanation with examples",
+            "transcript_density": "entries every 5-10 seconds",
+            "animation_style": "moderate pacing with clear transitions",
+        },
+        "comprehensive": {
+            "detail_level": "thorough in-depth explanation with multiple examples and edge cases",
+            "transcript_density": "entries every 3-5 seconds",
+            "animation_style": "slow, educational pacing with extended pauses for understanding",
+        },
+    }
+    depth = state.get("explanation_depth", "detailed")
+    depth_config = depth_configs.get(depth, depth_configs["detailed"])
+    
     # Generate code with LLM (OpenRouter)
     prompt = f"""Create a Manim animation based on this request:
 
 **Title:** {state["scene_title"]}
 **Description:** {state["scene_prompt_description"]}
 **Target Duration:** {target_seconds} seconds ({state["scene_length"]} minutes)
+**Explanation Level:** {depth} - {depth_config["detail_level"]}
 
 ## CRITICAL REQUIREMENTS:
 
@@ -129,6 +151,7 @@ Used animations: {', '.join(result.used_animations)}
    - Add sufficient self.wait() calls between animations.
    - Use run_time=2 or run_time=3 for major animations.
    - Calculate: you need roughly {target_seconds // 10} major animation sections.
+   - Animation style: {depth_config["animation_style"]}
 
 2. **NO OVERLAPPING ELEMENTS**: 
    - Position title at top using .to_edge(UP)
@@ -138,6 +161,8 @@ Used animations: {', '.join(result.used_animations)}
    - Use LEFT, RIGHT, UP, DOWN to arrange multiple items
 
 3. **TRANSCRIPT FOR AUDIO**: Provide a comprehensive transcript covering the entire video duration.
+   - Detail level: {depth_config["detail_level"]}
+   - Add transcript {depth_config["transcript_density"]}
 
 Here are some reference examples:
 
@@ -164,7 +189,7 @@ transcript = {{
     5: "Explanation of the first concept...",
     15: "Moving on to the next topic...",
     30: "Further explanation...",
-    # Add entries every 5-10 seconds covering the full {target_seconds} seconds
+    # Add entries {depth_config["transcript_density"]} covering the full {target_seconds} seconds
 }}
 # TRANSCRIPT_END
 ```
@@ -486,6 +511,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
     Merge audio segments with video using ffmpeg.
     
     Concatenates all audio segments and mixes with video.
+    Handles audio/video length mismatches by padding audio with silence.
     
     Input: synced_video_path, audio_segments, transcript_sections
     Output: final_output_path
@@ -494,11 +520,20 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
     audio_segments = state.get("audio_segments", [])
     transcript_sections = state.get("transcript_sections", [])
     
+    print(f"[AUDIO MERGE] Video path: {video_path}")
+    print(f"[AUDIO MERGE] Audio segments: {len(audio_segments)}")
+    
     if not video_path:
+        print("[AUDIO MERGE] No video path provided")
         return {"final_output_path": None}
     
+    # Filter to only existing audio files
+    valid_audio_segments = [p for p in audio_segments if p and Path(p).exists()]
+    print(f"[AUDIO MERGE] Valid audio files: {len(valid_audio_segments)}")
+    
     # If no audio segments, just use video as final
-    if not audio_segments:
+    if not valid_audio_segments:
+        print("[AUDIO MERGE] No valid audio segments, returning video only")
         return {"final_output_path": video_path}
     
     try:
@@ -508,12 +543,12 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
         # Create concat file for ffmpeg
         concat_file = Path(temp_dir) / "concat.txt"
         
-        # Build audio with proper timing based on transcript timestamps
-        # For now, concatenate audio files in order
+        # Build audio concat file
         with open(concat_file, "w") as f:
-            for audio_path in audio_segments:
-                if audio_path and Path(audio_path).exists():
-                    f.write(f"file '{audio_path}'\n")
+            for audio_path in valid_audio_segments:
+                f.write(f"file '{audio_path}'\n")
+        
+        print(f"[AUDIO MERGE] Created concat file: {concat_file}")
         
         # Concatenate all audio segments
         merged_audio = Path(temp_dir) / "merged_audio.wav"
@@ -526,6 +561,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
             str(merged_audio),
         ]
         
+        print(f"[AUDIO MERGE] Concatenating audio...")
         result = subprocess.run(
             concat_cmd,
             capture_output=True,
@@ -534,23 +570,29 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
         )
         
         if result.returncode != 0 or not merged_audio.exists():
-            print(f"Audio concat failed: {result.stderr}")
+            print(f"[AUDIO MERGE] Audio concat failed: {result.stderr}")
             return {"final_output_path": video_path}
         
-        # Merge audio with video
+        print(f"[AUDIO MERGE] Audio concatenated: {merged_audio}")
+        
+        # Merge audio with video using filter_complex to pad audio
+        # apad pads audio with silence if shorter than video
         final_output = Path(temp_dir) / "final_with_audio.mp4"
         merge_cmd = [
             "ffmpeg", "-y",
             "-i", video_path,
             "-i", str(merged_audio),
+            "-filter_complex", "[1:a]apad[a]",  # Pad audio with silence if needed
             "-c:v", "copy",
             "-c:a", "aac",
+            "-b:a", "128k",
             "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-shortest",
+            "-map", "[a]",
+            "-shortest",  # Use shortest (video length) since audio is padded
             str(final_output),
         ]
         
+        print(f"[AUDIO MERGE] Merging audio with video...")
         result = subprocess.run(
             merge_cmd,
             capture_output=True,
@@ -558,14 +600,36 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
             timeout=120,
         )
         
-        if result.returncode != 0 or not final_output.exists():
-            print(f"Video merge failed: {result.stderr}")
+        if result.returncode != 0:
+            print(f"[AUDIO MERGE] Merge command failed: {result.stderr}")
+            # Try simpler merge without filter_complex as fallback
+            print("[AUDIO MERGE] Trying simple merge fallback...")
+            simple_merge_cmd = [
+                "ffmpeg", "-y",
+                "-i", video_path,
+                "-i", str(merged_audio),
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                str(final_output),
+            ]
+            result = subprocess.run(
+                simple_merge_cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+        
+        if not final_output.exists():
+            print(f"[AUDIO MERGE] Final output not created")
             return {"final_output_path": video_path}
         
+        print(f"[AUDIO MERGE] Success! Final output: {final_output}")
         return {"final_output_path": str(final_output)}
     
     except Exception as e:
-        print(f"Audio/video merge error: {e}")
+        print(f"[AUDIO MERGE] Error: {e}")
         return {"final_output_path": video_path}
 
 
