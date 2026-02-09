@@ -27,7 +27,6 @@ except ImportError:
     SOUNDFILE_AVAILABLE = False
 
 
-# Model file URLs
 MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
 VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
 
@@ -162,22 +161,18 @@ class KokoroTTS:
             voice = voice or self.voice
             speed = speed or self.speed
             
-            # Generate output path if not provided
             if output_path is None:
                 fd, output_path = tempfile.mkstemp(suffix=".wav", prefix="kokoro_")
                 os.close(fd)
             
-            # Generate audio
             samples, sample_rate = self.kokoro.create(
                 text,
                 voice=voice,
                 speed=speed,
             )
             
-            # Save to file
             sf.write(output_path, samples, sample_rate)
             
-            # Calculate duration
             duration = len(samples) / sample_rate
             
             return TTSResult(
@@ -241,7 +236,6 @@ class KokoroTTS:
         return results
 
 
-# Singleton instance for convenience
 _tts_instance: Optional[KokoroTTS] = None
 
 

@@ -79,11 +79,12 @@ case "${1:-serve}" in
     
     "generate")
         if [ -z "$2" ]; then
-            echo "Usage: ./start.sh generate \"your prompt here\""
+            echo "Usage: ./start.sh generate \"your prompt here\" [-l length] [-d depth]"
             exit 1
         fi
         echo "Generating video..."
-        python -m src.main generate --prompt "$2" --output ./output
+        # Pass prompt as first arg, then forward remaining args ($3 onwards)
+        python -m src.main generate --prompt "$2" --output ./output "${@:3}"
         ;;
     
     "serve"|"api"|"server")

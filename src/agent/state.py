@@ -48,50 +48,39 @@ class VideoGenState(TypedDict):
     6. synchronizer -> aligned video with transcript
     7. audio_video_merger -> final output
     """
-    # Input fields
     system_message: str
     scene_title: str
     scene_prompt_description: str
     scene_length: float
     explanation_depth: str  # "basic", "detailed", or "comprehensive"
     
-    # RAG context
     retrieved_examples: list[str]  # Code examples from Graph RAG
     retrieved_context: str  # Formatted context for LLM
     
-    # Code generation
     code: str
     scene_class_name: str
     
-    # Transcript
     transcript: dict  # {timestamp: text}
     transcript_sections: list[TranscriptSection]
     
-    # Execution state
     error: Optional[str]
     error_count: Annotated[int, add]  # Tracks retry attempts
     max_retries: int
     
-    # Rendering
     temp_code_path: Optional[str]
     rendered_video_path: Optional[str]
     render_logs: str
     
-    # Validation
     video_valid: bool
     validation_errors: list[str]
     
-    # Synchronization
     checked_video_path: Optional[str]
     synced_video_path: Optional[str]
     
-    # Audio
     audio_segments: list[str]  # Paths to audio files
     
-    # Final output
     final_output_path: Optional[str]
     
-    # Metadata
     messages: Annotated[list[dict], add]  # Chat history for debugging
 
 
@@ -138,49 +127,38 @@ def create_initial_state(
 - Use only standard Manim colors: RED, BLUE, GREEN, YELLOW, WHITE, ORANGE, PURPLE, PINK, TEAL, GOLD."""
     
     return VideoGenState(
-        # Input
         system_message=system_message or default_system,
         scene_title=scene_title,
         scene_prompt_description=scene_prompt_description,
         scene_length=scene_length,
         explanation_depth=explanation_depth,
         
-        # RAG
         retrieved_examples=[],
         retrieved_context="",
         
-        # Code
         code="",
         scene_class_name="",
         
-        # Transcript
         transcript={},
         transcript_sections=[],
         
-        # Execution
         error=None,
         error_count=0,
         max_retries=max_retries,
         
-        # Rendering
         temp_code_path=None,
         rendered_video_path=None,
         render_logs="",
         
-        # Validation
         video_valid=False,
         validation_errors=[],
         
-        # Sync
         checked_video_path=None,
         synced_video_path=None,
         
-        # Audio
         audio_segments=[],
         
-        # Output
         final_output_path=None,
         
-        # Debug
         messages=[],
     )

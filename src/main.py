@@ -12,7 +12,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
 
 
@@ -42,7 +41,6 @@ def cmd_generate(args):
     print(f"Generating video for: {args.prompt}")
     print("-" * 50)
     
-    # Get defaults from environment, CLI overrides
     default_length = float(os.getenv("VIDEO_LENGTH", "1.0"))
     explanation_depth = args.depth or os.getenv("EXPLANATION_DEPTH", "detailed")
     scene_length = args.length if args.length != 1.0 else default_length
@@ -57,7 +55,6 @@ def cmd_generate(args):
         explanation_depth=explanation_depth,
     )
     
-    # Report results
     if result.get("final_output_path"):
         print(f"\n✓ Video generated: {result['final_output_path']}")
     elif result.get("rendered_video_path"):
@@ -67,7 +64,6 @@ def cmd_generate(args):
         if result.get("error"):
             print(f"Error: {result['error']}")
     
-    # Save code if requested
     if args.output and result.get("code"):
         output_dir = Path(args.output)
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -77,7 +73,6 @@ def cmd_generate(args):
             f.write(result["code"])
         print(f"✓ Code saved: {code_path}")
         
-        # Copy video if exists
         if result.get("final_output_path") or result.get("rendered_video_path"):
             import shutil
             video_src = result.get("final_output_path") or result["rendered_video_path"]
@@ -107,7 +102,6 @@ def main():
     
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
     
-    # Index command
     index_parser = subparsers.add_parser("index", help="Index the JSONL dataset")
     index_parser.add_argument(
         "--data", "-d",
@@ -115,7 +109,6 @@ def main():
         help="Path to directory containing JSONL files",
     )
     
-    # Generate command
     gen_parser = subparsers.add_parser("generate", help="Generate a Manim video")
     gen_parser.add_argument(
         "--prompt", "-p",
@@ -142,7 +135,6 @@ def main():
         help="Explanation depth level (default: from .env or 'detailed')",
     )
     
-    # Serve command
     serve_parser = subparsers.add_parser("serve", help="Start the API server")
     serve_parser.add_argument(
         "--host",

@@ -82,7 +82,6 @@ def video_code_gen_node(state: VideoGenState) -> dict:
     Input: system_message, scene_title, scene_prompt_description
     Output: code, transcript, retrieved_examples, retrieved_context
     """
-    # Initialize retriever
     retriever = ManimRetriever()
     
     try:
@@ -92,7 +91,6 @@ def video_code_gen_node(state: VideoGenState) -> dict:
             limit=3,
         )
         
-        # Format context from retrieved examples
         context_parts = []
         example_ids = []
         for result in results:
@@ -113,11 +111,9 @@ Used animations: {', '.join(result.used_animations)}
     finally:
         retriever.close()
     
-    # Calculate target duration in seconds
     target_seconds = int(state["scene_length"] * 60)
     print(f"[CODE GEN] Target duration: {target_seconds} seconds")
     
-    # Configure based on explanation depth
     depth_configs = {
         "basic": {
             "detail_level": "high-level overview with key points only",
@@ -138,7 +134,6 @@ Used animations: {', '.join(result.used_animations)}
     depth = state.get("explanation_depth", "detailed")
     depth_config = depth_configs.get(depth, depth_configs["detailed"])
     
-    # Generate code with LLM (OpenRouter)
     prompt = f"""Create a Manim animation based on this request:
 
 **Title:** {state["scene_title"]}
@@ -185,6 +180,7 @@ Use ONLY these correct APIs. DO NOT use deprecated syntax:
 - Line with tip: `Line(start, end).add_tip(tip_length=0.2)` - NOT `length=`
 - Text: `Text("string")` - NOT `TextMobject` or `TexMobject`
 - MathTex: `MathTex(r"\\frac{{a}}{{b}}")` - use raw strings with double braces
+- Code: DO NOT use `Code()` class - instead use `Text()` with monospace font or `Paragraph()`
 - Colors: `RED, BLUE, GREEN, YELLOW, WHITE` - built-in constants
 - Positioning: `.move_to(point)`, `.next_to(obj, direction, buff=0.3)`
 - VGroup: `VGroup(obj1, obj2).arrange(DOWN, buff=0.3)`
@@ -233,11 +229,9 @@ transcript = {{
     response_text = llm_chat(messages, temperature=0.2)
     
     if response_text:
-        # Parse code
         code_match = re.search(r'# CODE_START\n(.*?)# CODE_END', response_text, re.DOTALL)
         code = code_match.group(1).strip() if code_match else response_text
         
-        # Parse transcript
         transcript = {}
         transcript_match = re.search(r'# TRANSCRIPT_START\n.*?transcript\s*=\s*(\{.*?\})\s*# TRANSCRIPT_END', response_text, re.DOTALL)
         if transcript_match:
@@ -246,11 +240,9 @@ transcript = {{
             except:
                 pass
         
-        # Extract scene class name
         scene_match = re.search(r'class\s+(\w+)\s*\([^)]*Scene[^)]*\)', code)
         scene_class_name = scene_match.group(1) if scene_match else "GeneratedScene"
     else:
-        # Fallback if no LLM available
         code = f'''from manim import *
 
 class GeneratedScene(Scene):
@@ -286,7 +278,6 @@ def code_executor_node(state: VideoGenState) -> dict:
     """
     print(f"[EXECUTOR] Starting Manim render for scene: {state.get('scene_class_name')}")
     
-    # Write code to temp file
     temp_dir = tempfile.mkdtemp(prefix="manim_")
     code_path = Path(temp_dir) / "scene.py"
     
@@ -295,7 +286,6 @@ def code_executor_node(state: VideoGenState) -> dict:
     
     print(f"[EXECUTOR] Code saved to: {code_path}")
     
-    # Run manim render
     output_dir = Path(temp_dir) / "media"
     cmd = [
         "manim", "render",
@@ -319,9 +309,9 @@ def code_executor_node(state: VideoGenState) -> dict:
         render_logs = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
         
         if result.returncode != 0:
-            # Extract error message
             error_msg = result.stderr or result.stdout or "Unknown render error"
             print(f"[EXECUTOR] Render FAILED: {error_msg[:200]}...")
+            print(f"[EXECUTOR] Returning error state for recorrection")
             return {
                 "error": error_msg,
                 "error_count": 1,
@@ -329,7 +319,6 @@ def code_executor_node(state: VideoGenState) -> dict:
                 "temp_code_path": str(code_path),
             }
         
-        # Find rendered video
         video_files = list(output_dir.rglob("*.mp4"))
         print(f"[EXECUTOR] Found {len(video_files)} video files")
         
@@ -376,8 +365,22 @@ def recorrector_node(state: VideoGenState) -> dict:
     Input: code, error, retrieved_context
     Output: corrected code
     """
+    error_count = state.get("error_count", 0)
+    print(f"[RECORRECTOR] Attempt {error_count + 1} to fix error")
+    print(f"[RECORRECTOR] Error: {state.get('error', 'unknown')[:200]}...")
+    
     messages = [
-        {"role": "system", "content": "You are an expert at debugging Manim code. Fix the error in the code below. Return only the corrected Python code, no explanations."},
+        {"role": "system", "content": """You are an expert at debugging Manim code for Manim v0.18+.
+
+CRITICAL API RULES:
+- Arrow: use tip_length=0.2, NOT length=
+- Line.add_tip(): use tip_length=0.2, NOT length=
+- DO NOT use Code() class - use Text() with monospace styling instead
+- Use Text() not TextMobject or TexMobject
+- Use Create() not ShowCreation()
+- Use MathTex(r"...") with raw strings
+
+Fix the error and return ONLY the corrected Python code."""},
         {"role": "user", "content": f"""
 The following Manim code produced an error:
 
@@ -398,10 +401,8 @@ Only return the Python code, nothing else.
     fixed_code = llm_chat(messages, temperature=0.1)
     
     if not fixed_code:
-        # Fallback: add error as comment and return
         fixed_code = f"# Error was: {state['error'][:100]}\n{state['code']}"
     else:
-        # Clean up markdown code blocks if present
         if "```python" in fixed_code:
             match = re.search(r'```python\n(.*?)```', fixed_code, re.DOTALL)
             if match:
@@ -435,12 +436,10 @@ def transcript_processor_node(state: VideoGenState) -> dict:
     audio_segments = []
     transcript = state.get("transcript", {})
     
-    # Sort by timestamp
     sorted_items = sorted(transcript.items(), key=lambda x: float(x[0]))
     
     print(f"[TTS] Processing {len(sorted_items)} transcript segments...")
     
-    # Try to use Kokoro TTS
     tts = None
     try:
         from ..tts import KokoroTTS, KOKORO_AVAILABLE
@@ -455,7 +454,6 @@ def transcript_processor_node(state: VideoGenState) -> dict:
     for i, (timestamp, text) in enumerate(sorted_items):
         audio_path = None
         
-        # Generate audio with Kokoro TTS if available
         if tts and text.strip():
             try:
                 print(f"[TTS] Generating audio for segment {i+1}/{len(sorted_items)}: {text[:50]}...")
@@ -508,13 +506,11 @@ def render_checker_node(state: VideoGenState) -> dict:
             "checked_video_path": None,
         }
     
-    # Check file size
     file_size = Path(video_path).stat().st_size
     print(f"[RENDER CHECK] Video file size: {file_size} bytes")
     if file_size < 1000:  # Less than 1KB is suspicious
         errors.append(f"Video file too small: {file_size} bytes")
     
-    # Check with ffprobe if available
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-show_format", "-show_streams", video_path],
@@ -594,30 +590,24 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
         print("[AUDIO MERGE] No video path provided")
         return {"final_output_path": None}
     
-    # Filter to only existing audio files
     valid_audio_segments = [p for p in audio_segments if p and Path(p).exists()]
     print(f"[AUDIO MERGE] Valid audio files: {len(valid_audio_segments)}")
     
-    # If no audio segments, just use video as final
     if not valid_audio_segments:
         print("[AUDIO MERGE] No valid audio segments, returning video only")
         return {"final_output_path": video_path}
     
     try:
-        # Create temp directory for processing
         temp_dir = tempfile.mkdtemp(prefix="manim_merge_")
         
-        # Create concat file for ffmpeg
         concat_file = Path(temp_dir) / "concat.txt"
         
-        # Build audio concat file
         with open(concat_file, "w") as f:
             for audio_path in valid_audio_segments:
                 f.write(f"file '{audio_path}'\n")
         
         print(f"[AUDIO MERGE] Created concat file: {concat_file}")
         
-        # Concatenate all audio segments
         merged_audio = Path(temp_dir) / "merged_audio.wav"
         concat_cmd = [
             "ffmpeg", "-y",
@@ -706,8 +696,18 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
 
 def should_retry_or_continue(state: VideoGenState) -> Literal["recorrector", "render_checker"]:
     """Decide whether to retry code correction or proceed to render checking."""
-    if state.get("error") and state.get("error_count", 0) < state.get("max_retries", 3):
+    error = state.get("error")
+    error_count = state.get("error_count", 0)
+    max_retries = state.get("max_retries", 3)
+    
+    if error and error_count < max_retries:
+        print(f"[RETRY] Error detected, attempt {error_count + 1}/{max_retries} - sending to recorrector")
         return "recorrector"
+    
+    if error:
+        print(f"[RETRY] Max retries ({max_retries}) reached, proceeding to render_checker")
+    else:
+        print("[RETRY] No error, proceeding to render_checker")
     return "render_checker"
 
 

@@ -179,7 +179,6 @@ class ManimIndexer:
     def init_schema(self):
         """Initialize Neo4j schema with constraints and indexes."""
         with self.neo4j_driver.session() as session:
-            # Create constraints
             for constraint in SCHEMA_CONSTRAINTS.strip().split(';'):
                 constraint = constraint.strip()
                 if constraint:
@@ -188,7 +187,6 @@ class ManimIndexer:
                     except Exception as e:
                         print(f"Constraint may already exist: {e}")
             
-            # Create indexes
             for index in SCHEMA_INDEXES.strip().split(';'):
                 index = index.strip()
                 if index:
@@ -200,7 +198,6 @@ class ManimIndexer:
     def seed_known_entities(self):
         """Seed the graph with known Manim classes and animations."""
         with self.neo4j_driver.session() as session:
-            # Seed classes
             for cls in KNOWN_MANIM_CLASSES:
                 session.run("""
                     MERGE (c:ManimClass {name: $name})
@@ -211,7 +208,6 @@ class ManimIndexer:
                 """, name=cls.name, module=cls.module, description=cls.description,
                     is_scene=cls.is_scene, is_mobject=cls.is_mobject)
             
-            # Seed animations
             for anim in KNOWN_ANIMATIONS:
                 session.run("""
                     MERGE (a:Animation {name: $name})
@@ -228,9 +224,7 @@ class ManimIndexer:
         used_animations = self._extract_used_animations(code)
         concepts = self._extract_concepts(prompt)
         
-        # Add to Neo4j
         with self.neo4j_driver.session() as session:
-            # Create example node
             session.run("""
                 MERGE (e:Example {id: $id})
                 SET e.prompt = $prompt,
@@ -238,7 +232,6 @@ class ManimIndexer:
                     e.scene_class = $scene_class
             """, id=example_id, prompt=prompt, code=code, scene_class=scene_class)
             
-            # Create USES relationships to classes
             for cls_name in used_classes:
                 session.run("""
                     MATCH (e:Example {id: $example_id})
@@ -246,7 +239,6 @@ class ManimIndexer:
                     MERGE (e)-[:USES]->(c)
                 """, example_id=example_id, class_name=cls_name)
             
-            # Create USES relationships to animations
             for anim_name in used_animations:
                 session.run("""
                     MATCH (e:Example {id: $example_id})
@@ -254,7 +246,6 @@ class ManimIndexer:
                     MERGE (e)-[:USES]->(a)
                 """, example_id=example_id, anim_name=anim_name)
             
-            # Create concept nodes and relationships
             for concept in concepts:
                 session.run("""
                     MERGE (c:Concept {name: $name})
@@ -287,14 +278,12 @@ class ManimIndexer:
         if not data_path.exists():
             raise ValueError(f"Directory not found: {data_dir}")
         
-        # Initialize schema and seed data
         print("Initializing schema...")
         self.init_schema()
         
         print("Seeding known entities...")
         self.seed_known_entities()
         
-        # Find and process files
         files = list(data_path.glob(pattern))
         print(f"Found {len(files)} JSONL files")
         

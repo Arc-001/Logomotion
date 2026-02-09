@@ -1,8 +1,5 @@
 """
 LangGraph StateGraph builder for the Manim video generation workflow.
-
-Constructs the complete graph with all nodes and edges,
-including conditional routing for error handling.
 """
 
 from langgraph.graph import StateGraph, END
@@ -51,10 +48,8 @@ def build_video_gen_graph() -> StateGraph:
       ▼
      END
     """
-    # Create the graph builder
     builder = StateGraph(VideoGenState)
     
-    # Add all nodes
     builder.add_node("video_code_gen", video_code_gen_node)
     builder.add_node("code_executor", code_executor_node)
     builder.add_node("recorrector", recorrector_node)
@@ -63,15 +58,12 @@ def build_video_gen_graph() -> StateGraph:
     builder.add_node("synchronizer", synchronizer_node)
     builder.add_node("audio_video_merger", audio_video_merger_node)
     
-    # Set entry point
     builder.set_entry_point("video_code_gen")
     
-    # Add edges
     # After code generation, run both executor and transcript processor in parallel
     builder.add_edge("video_code_gen", "code_executor")
     builder.add_edge("video_code_gen", "transcript_processor")
     
-    # Conditional edge: retry on error or proceed
     builder.add_conditional_edges(
         "code_executor",
         should_retry_or_continue,
@@ -81,19 +73,10 @@ def build_video_gen_graph() -> StateGraph:
         }
     )
     
-    # After recorrection, try executing again
     builder.add_edge("recorrector", "code_executor")
-    
-    # Render checker leads to synchronizer
     builder.add_edge("render_checker", "synchronizer")
-    
-    # Transcript processor also leads to synchronizer
     builder.add_edge("transcript_processor", "synchronizer")
-    
-    # Synchronizer leads to merger
     builder.add_edge("synchronizer", "audio_video_merger")
-    
-    # Merger ends the workflow
     builder.add_edge("audio_video_merger", END)
     
     return builder
@@ -105,7 +88,6 @@ def compile_graph():
     return builder.compile()
 
 
-# Create the compiled graph as a module-level variable
 graph = None
 
 
@@ -137,7 +119,6 @@ async def generate_video(
     Returns:
         Final state dict with paths to generated files
     """
-    # Create initial state
     initial_state = create_initial_state(
         scene_title=scene_title,
         scene_prompt_description=scene_prompt_description,
@@ -146,10 +127,8 @@ async def generate_video(
         system_message=system_message,
     )
     
-    # Get compiled graph
     compiled_graph = get_graph()
     
-    # Run the graph
     final_state = await compiled_graph.ainvoke(initial_state)
     
     return final_state

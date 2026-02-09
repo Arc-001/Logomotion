@@ -56,17 +56,14 @@ class ManimExecutor:
         Returns:
             ExecutionResult with video path or error
         """
-        # Create temp directory
         temp_dir = tempfile.mkdtemp(prefix="manim_exec_")
         code_path = Path(temp_dir) / "scene.py"
         output_dir = Path(temp_dir) / "media"
         
         try:
-            # Write code to file
             with open(code_path, "w", encoding="utf-8") as f:
                 f.write(code)
             
-            # Build command
             cmd = [
                 "manim", "render",
                 str(code_path),
@@ -75,7 +72,6 @@ class ManimExecutor:
                 "--media_dir", str(output_dir),
             ]
             
-            # Execute
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -96,7 +92,6 @@ class ManimExecutor:
                     output_dir=str(output_dir),
                 )
             
-            # Find video file
             video_path = self._find_video(output_dir, scene_class_name)
             
             if not video_path:
@@ -110,7 +105,6 @@ class ManimExecutor:
                     output_dir=str(output_dir),
                 )
             
-            # Optionally move to permanent location
             if output_name:
                 final_dir = Path(self.base_output_dir) / output_name
                 final_dir.mkdir(parents=True, exist_ok=True)
@@ -154,7 +148,6 @@ class ManimExecutor:
         if not output_dir.exists():
             return None
         
-        # Look for mp4 files
         video_files = list(output_dir.rglob("*.mp4"))
         
         if not video_files:
@@ -165,14 +158,12 @@ class ManimExecutor:
             if scene_name.lower() in vf.stem.lower():
                 return str(vf)
         
-        # Return first video found
         return str(video_files[0])
     
     def _parse_error(self, error_text: str) -> str:
-        """Extract meaningful error message from output."""
+        """Extract meaningful error messages from output."""
         lines = error_text.split("\n")
         
-        # Look for Python traceback
         error_lines = []
         in_traceback = False
         
