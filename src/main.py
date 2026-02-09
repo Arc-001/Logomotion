@@ -47,6 +47,9 @@ def cmd_generate(args):
     explanation_depth = args.depth or os.getenv("EXPLANATION_DEPTH", "detailed")
     scene_length = args.length if args.length != 1.0 else default_length
     
+    print(f"[CONFIG] Scene length: {scene_length} minutes ({scene_length * 60} seconds)")
+    print(f"[CONFIG] Explanation depth: {explanation_depth}")
+    
     result = generate_video_sync(
         scene_title=args.title or "Generated Scene",
         scene_prompt_description=args.prompt,

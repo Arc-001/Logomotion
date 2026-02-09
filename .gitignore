@@ -64,8 +64,12 @@ neo4j_data/
 *.tmp
 .DS_Store
 Thumbs.db
+scene.py
 
 # Secrets
 .env
 *.pem
 *.key
+*.mp4
+
+

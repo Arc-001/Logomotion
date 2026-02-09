@@ -115,6 +115,7 @@ Used animations: {', '.join(result.used_animations)}
     
     # Calculate target duration in seconds
     target_seconds = int(state["scene_length"] * 60)
+    print(f"[CODE GEN] Target duration: {target_seconds} seconds")
     
     # Configure based on explanation depth
     depth_configs = {
