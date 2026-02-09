@@ -145,24 +145,53 @@ Used animations: {', '.join(result.used_animations)}
 **Target Duration:** {target_seconds} seconds ({state["scene_length"]} minutes)
 **Explanation Level:** {depth} - {depth_config["detail_level"]}
 
-## CRITICAL REQUIREMENTS:
+## CRITICAL REQUIREMENTS (MUST FOLLOW STRICTLY):
 
-1. **DURATION**: The video MUST be approximately {target_seconds} seconds long. 
-   - Add sufficient self.wait() calls between animations.
-   - Use run_time=2 or run_time=3 for major animations.
-   - Calculate: you need roughly {target_seconds // 10} major animation sections.
-   - Animation style: {depth_config["animation_style"]}
+### 1. SCREEN BOUNDS - NEVER GO OUT OF FRAME
+- The Manim frame is 14.2 units wide (-7.1 to +7.1) and 8 units tall (-4 to +4)
+- ALWAYS use .scale() to keep objects within bounds (typical scale: 0.5 to 0.8 for text)
+- ALWAYS check positions: x should be in [-6, 6], y should be in [-3.5, 3.5] to leave margins
+- For multiple elements, use VGroup and .arrange(DOWN/RIGHT, buff=0.3) then scale the group
+- NEVER animate objects that start or end outside the visible frame
 
-2. **NO OVERLAPPING ELEMENTS**: 
-   - Position title at top using .to_edge(UP)
-   - Position main content in center
-   - Position labels/equations using .next_to() with buff=0.5
-   - FadeOut elements before reusing their screen space
-   - Use LEFT, RIGHT, UP, DOWN to arrange multiple items
+### 2. POSITIONING - PREVENT ALL OVERLAPS
+- Title: ALWAYS use .to_edge(UP, buff=0.5) with .scale(0.7)
+- Main content: Use .move_to(ORIGIN) or explicit coordinates
+- Side elements: Use .to_edge(LEFT/RIGHT, buff=0.5)
+- Labels: Use .next_to(target, direction, buff=0.3)
+- ALWAYS FadeOut() previous elements before showing new ones in the same area
+- Use .shift() with small values (max 2 units) for adjustments
 
-3. **TRANSCRIPT FOR AUDIO**: Provide a comprehensive transcript covering the entire video duration.
-   - Detail level: {depth_config["detail_level"]}
-   - Add transcript {depth_config["transcript_density"]}
+### 3. SAFE LAYOUT PATTERN (FOLLOW THIS)
+```python
+# Title at top
+title = Text("Title").scale(0.7).to_edge(UP, buff=0.5)
+# Main content in center (scaled to fit)
+content = VGroup(item1, item2, item3).arrange(DOWN, buff=0.3).scale(0.6).move_to(ORIGIN)
+# Labels positioned relative to content
+label = Text("Label").scale(0.4).next_to(content, RIGHT, buff=0.5)
+```
+
+### 4. DURATION
+- Target: approximately {target_seconds} seconds
+- Use self.wait(1) to self.wait(3) between sections
+- Use run_time=2 for major animations
+- Animation style: {depth_config["animation_style"]}
+
+### 5. MANIM API (v0.18+ ONLY - CRITICAL)
+Use ONLY these correct APIs. DO NOT use deprecated syntax:
+- Arrow: `Arrow(start, end, tip_length=0.2)` - NOT `length=` or `tip_size=`
+- Line with tip: `Line(start, end).add_tip(tip_length=0.2)` - NOT `length=`
+- Text: `Text("string")` - NOT `TextMobject` or `TexMobject`
+- MathTex: `MathTex(r"\\frac{{a}}{{b}}")` - use raw strings with double braces
+- Colors: `RED, BLUE, GREEN, YELLOW, WHITE` - built-in constants
+- Positioning: `.move_to(point)`, `.next_to(obj, direction, buff=0.3)`
+- VGroup: `VGroup(obj1, obj2).arrange(DOWN, buff=0.3)`
+- Avoid: `ShowCreation` (use `Create`), `FadeInFromDown` (use `FadeIn` with shift)
+
+### 6. TRANSCRIPT FOR AUDIO
+- Detail level: {depth_config["detail_level"]}
+- Add transcript {depth_config["transcript_density"]}
 
 Here are some reference examples:
 
@@ -254,12 +283,16 @@ def code_executor_node(state: VideoGenState) -> dict:
     Input: code, scene_class_name
     Output: rendered_video_path OR error
     """
+    print(f"[EXECUTOR] Starting Manim render for scene: {state.get('scene_class_name')}")
+    
     # Write code to temp file
     temp_dir = tempfile.mkdtemp(prefix="manim_")
     code_path = Path(temp_dir) / "scene.py"
     
     with open(code_path, "w") as f:
         f.write(state["code"])
+    
+    print(f"[EXECUTOR] Code saved to: {code_path}")
     
     # Run manim render
     output_dir = Path(temp_dir) / "media"
@@ -270,6 +303,8 @@ def code_executor_node(state: VideoGenState) -> dict:
         "-ql",  # Low quality for faster testing
         "--media_dir", str(output_dir),
     ]
+    
+    print(f"[EXECUTOR] Running: {' '.join(cmd)}")
     
     try:
         result = subprocess.run(
@@ -285,6 +320,7 @@ def code_executor_node(state: VideoGenState) -> dict:
         if result.returncode != 0:
             # Extract error message
             error_msg = result.stderr or result.stdout or "Unknown render error"
+            print(f"[EXECUTOR] Render FAILED: {error_msg[:200]}...")
             return {
                 "error": error_msg,
                 "error_count": 1,
@@ -294,7 +330,10 @@ def code_executor_node(state: VideoGenState) -> dict:
         
         # Find rendered video
         video_files = list(output_dir.rglob("*.mp4"))
+        print(f"[EXECUTOR] Found {len(video_files)} video files")
+        
         if not video_files:
+            print("[EXECUTOR] No video file produced!")
             return {
                 "error": "No video file produced",
                 "error_count": 1,
@@ -302,6 +341,7 @@ def code_executor_node(state: VideoGenState) -> dict:
                 "temp_code_path": str(code_path),
             }
         
+        print(f"[EXECUTOR] Render SUCCESS: {video_files[0]}")
         return {
             "rendered_video_path": str(video_files[0]),
             "error": None,
@@ -411,18 +451,22 @@ def transcript_processor_node(state: VideoGenState) -> dict:
     except ImportError as e:
         print(f"[TTS] WARNING: Could not import TTS module: {e}")
     
-    for timestamp, text in sorted_items:
+    for i, (timestamp, text) in enumerate(sorted_items):
         audio_path = None
         
         # Generate audio with Kokoro TTS if available
         if tts and text.strip():
             try:
+                print(f"[TTS] Generating audio for segment {i+1}/{len(sorted_items)}: {text[:50]}...")
                 result = tts.synthesize(text)
                 if result.success:
                     audio_path = result.audio_path
                     audio_segments.append(audio_path)
+                    print(f"[TTS] ✓ Segment {i+1} saved to: {audio_path}")
+                else:
+                    print(f"[TTS] ✗ Segment {i+1} failed: {result.error}")
             except Exception as e:
-                print(f"TTS generation failed for segment: {e}")
+                print(f"[TTS] ✗ Segment {i+1} exception: {e}")
         
         section = TranscriptSection(
             timestamp=float(timestamp),
@@ -430,6 +474,8 @@ def transcript_processor_node(state: VideoGenState) -> dict:
             audio_path=audio_path,
         )
         sections.append(section)
+    
+    print(f"[TTS] Complete: {len(audio_segments)} audio files generated")
     
     return {
         "transcript_sections": sections,
@@ -451,14 +497,19 @@ def render_checker_node(state: VideoGenState) -> dict:
     video_path = state.get("rendered_video_path")
     errors = []
     
+    print(f"[RENDER CHECK] Input video path: {video_path}")
+    
     if not video_path or not Path(video_path).exists():
+        print(f"[RENDER CHECK] Video file does not exist!")
         return {
             "video_valid": False,
             "validation_errors": ["Video file does not exist"],
+            "checked_video_path": None,
         }
     
     # Check file size
     file_size = Path(video_path).stat().st_size
+    print(f"[RENDER CHECK] Video file size: {file_size} bytes")
     if file_size < 1000:  # Less than 1KB is suspicious
         errors.append(f"Video file too small: {file_size} bytes")
     
@@ -477,10 +528,13 @@ def render_checker_node(state: VideoGenState) -> dict:
     except Exception as e:
         errors.append(f"Video validation error: {e}")
     
+    checked_path = video_path if len(errors) == 0 else None
+    print(f"[RENDER CHECK] Validation {'passed' if checked_path else 'failed'}: {errors}")
+    
     return {
         "video_valid": len(errors) == 0,
         "validation_errors": errors,
-        "checked_video_path": video_path if len(errors) == 0 else None,
+        "checked_video_path": checked_path,
     }
 
 
@@ -492,13 +546,25 @@ def synchronizer_node(state: VideoGenState) -> dict:
     """
     Synchronize video with transcript timestamps.
     
-    Input: checked_video_path, transcript_sections
-    Output: synced_video_path
+    This node receives state from both the video rendering branch and
+    the transcript processing branch. It passes through all relevant data.
+    
+    Input: checked_video_path, transcript_sections, audio_segments
+    Output: synced_video_path (plus passthrough of audio data)
     """
-    # For now, just pass through the video
-    # Full implementation would add subtitle track or timing markers
+    video_path = state.get("checked_video_path")
+    audio_segments = state.get("audio_segments", [])
+    transcript_sections = state.get("transcript_sections", [])
+    
+    print(f"[SYNC] Video path: {video_path}")
+    print(f"[SYNC] Audio segments: {len(audio_segments)}")
+    print(f"[SYNC] Transcript sections: {len(transcript_sections)}")
+    
+    # Pass through all data - don't drop audio_segments!
     return {
-        "synced_video_path": state.get("checked_video_path"),
+        "synced_video_path": video_path,
+        "audio_segments": audio_segments,  # Preserve audio from transcript_processor
+        "transcript_sections": transcript_sections,
     }
 
 
