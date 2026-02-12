@@ -6,6 +6,7 @@ and capturing output/errors.
 """
 
 import os
+import sys
 import tempfile
 import subprocess
 import shutil
@@ -39,6 +40,48 @@ class ManimExecutor:
         self.quality = quality
         self.timeout = timeout
     
+    @staticmethod
+    def _resolve_manim_cmd() -> str:
+        """Auto-discover the manim binary.
+        
+        Search order:
+          1. Same bin/ directory as the running Python interpreter (venv)
+          2. ~/.local/bin/manim
+          3. Fall back to bare 'manim' (relies on PATH)
+        """
+        # 1. Check venv bin directory (sibling of sys.executable)
+        venv_bin = Path(sys.executable).parent / "manim"
+        if venv_bin.is_file():
+            return str(venv_bin)
+        
+        # 2. Check ~/.local/bin
+        local_bin = Path.home() / ".local" / "bin" / "manim"
+        if local_bin.is_file():
+            return str(local_bin)
+        
+        # 3. Fallback
+        return "manim"
+    
+    @staticmethod
+    def _build_env(cwd: str) -> dict:
+        """Build subprocess environment with venv/bin and ~/.local/bin on PATH."""
+        env = os.environ.copy()
+        extra_paths = []
+        
+        venv_bin = str(Path(sys.executable).parent)
+        if venv_bin not in env.get("PATH", ""):
+            extra_paths.append(venv_bin)
+        
+        local_bin = str(Path.home() / ".local" / "bin")
+        if local_bin not in env.get("PATH", ""):
+            extra_paths.append(local_bin)
+        
+        if extra_paths:
+            env["PATH"] = os.pathsep.join(extra_paths) + os.pathsep + env.get("PATH", "")
+        
+        env["PYTHONPATH"] = cwd
+        return env
+    
     def execute(
         self,
         code: str,
@@ -60,12 +103,14 @@ class ManimExecutor:
         code_path = Path(temp_dir) / "scene.py"
         output_dir = Path(temp_dir) / "media"
         
+        manim_cmd = self._resolve_manim_cmd()
+        
         try:
             with open(code_path, "w", encoding="utf-8") as f:
                 f.write(code)
             
             cmd = [
-                "manim", "render",
+                manim_cmd, "render",
                 str(code_path),
                 scene_class_name,
                 f"-q{self.quality}",
@@ -78,7 +123,7 @@ class ManimExecutor:
                 text=True,
                 timeout=self.timeout,
                 cwd=temp_dir,
-                env={**os.environ, "PYTHONPATH": temp_dir},
+                env=self._build_env(temp_dir),
             )
             
             if result.returncode != 0:

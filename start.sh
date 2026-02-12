@@ -57,6 +57,9 @@ if [ -d "venv" ]; then
     source venv/bin/activate
 fi
 
+# Ensure manim and other user-installed tools are on PATH
+export PATH="$HOME/.local/bin:$PATH"
+
 # Check if .env exists
 if [ ! -f ".env" ]; then
     echo "[WARN] No .env file found. Creating from template..."
