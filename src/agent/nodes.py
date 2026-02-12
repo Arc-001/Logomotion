@@ -488,15 +488,21 @@ def transcript_processor_node(state: VideoGenState) -> dict:
 
 def render_checker_node(state: VideoGenState) -> dict:
     """
-    Validate the rendered video.
+    Validate the rendered video and measure its actual duration.
     
-    Input: rendered_video_path
-    Output: video_valid, validation_errors, checked_video_path
+    Compares actual duration against target_duration (scene_length * 60).
+    Flags duration mismatch if outside ±20% tolerance.
+    
+    Input: rendered_video_path, scene_length
+    Output: video_valid, validation_errors, checked_video_path, actual_duration
     """
     video_path = state.get("rendered_video_path")
+    target_duration = state.get("target_duration", state.get("scene_length", 1.0) * 60)
     errors = []
+    actual_duration = None
     
     print(f"[RENDER CHECK] Input video path: {video_path}")
+    print(f"[RENDER CHECK] Target duration: {target_duration}s")
     
     if not video_path or not Path(video_path).exists():
         print(f"[RENDER CHECK] Video file does not exist!")
@@ -504,35 +510,195 @@ def render_checker_node(state: VideoGenState) -> dict:
             "video_valid": False,
             "validation_errors": ["Video file does not exist"],
             "checked_video_path": None,
+            "actual_duration": None,
         }
     
     file_size = Path(video_path).stat().st_size
     print(f"[RENDER CHECK] Video file size: {file_size} bytes")
-    if file_size < 1000:  # Less than 1KB is suspicious
+    if file_size < 1000:
         errors.append(f"Video file too small: {file_size} bytes")
     
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_format", "-show_streams", video_path],
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "csv=p=0",
+                video_path,
+            ],
             capture_output=True,
             text=True,
             timeout=30,
         )
-        if result.returncode != 0:
-            errors.append(f"ffprobe error: {result.stderr}")
+        if result.returncode == 0 and result.stdout.strip():
+            actual_duration = float(result.stdout.strip())
+            print(f"[RENDER CHECK] Actual duration: {actual_duration:.1f}s (target: {target_duration:.1f}s)")
+            
+            duration_ratio = actual_duration / target_duration if target_duration > 0 else 1.0
+            tolerance = 0.20  # ±20%
+            if abs(duration_ratio - 1.0) > tolerance:
+                deviation_pct = (duration_ratio - 1.0) * 100
+                direction = "longer" if deviation_pct > 0 else "shorter"
+                errors.append(
+                    f"Duration mismatch: video is {abs(deviation_pct):.0f}% {direction} "
+                    f"than target ({actual_duration:.1f}s vs {target_duration:.1f}s)"
+                )
+                print(f"[RENDER CHECK] Duration mismatch: {deviation_pct:+.0f}%")
+            else:
+                print(f"[RENDER CHECK] Duration within tolerance ({duration_ratio:.2f}x)")
+        else:
+            print(f"[RENDER CHECK] Could not determine video duration")
+            if result.stderr:
+                errors.append(f"ffprobe error: {result.stderr}")
     except FileNotFoundError:
-        pass  # ffprobe not available, skip check
+        print("[RENDER CHECK] ffprobe not available, skipping duration check")
     except Exception as e:
         errors.append(f"Video validation error: {e}")
     
-    checked_path = video_path if len(errors) == 0 else None
+    duration_errors = [e for e in errors if "Duration mismatch" in e]
+    non_duration_errors = [e for e in errors if "Duration mismatch" not in e]
+    
+    video_valid = len(non_duration_errors) == 0
+    checked_path = video_path if video_valid else None
+    
     print(f"[RENDER CHECK] Validation {'passed' if checked_path else 'failed'}: {errors}")
     
     return {
-        "video_valid": len(errors) == 0,
+        "video_valid": video_valid,
         "validation_errors": errors,
         "checked_video_path": checked_path,
+        "actual_duration": actual_duration,
     }
+
+
+# ============================================================================
+# NODE 5b: Video Duration Fixer
+# ============================================================================
+
+def video_duration_fixer_node(state: VideoGenState) -> dict:
+    """
+    Adjust video playback speed to match target duration using ffmpeg.
+    
+    Uses PTS (Presentation Time Stamp) manipulation to speed up or slow
+    down the video. Caps adjustment at 2x to avoid extreme distortion.
+    
+    Input: checked_video_path, actual_duration, target_duration
+    Output: checked_video_path (adjusted), duration_adjusted, duration_factor
+    """
+    video_path = state.get("checked_video_path")
+    actual_duration = state.get("actual_duration")
+    target_duration = state.get("target_duration", state.get("scene_length", 1.0) * 60)
+    
+    print(f"[DURATION FIX] Video: {video_path}")
+    print(f"[DURATION FIX] Actual: {actual_duration}s -> Target: {target_duration}s")
+    
+    if not video_path or not actual_duration or actual_duration <= 0:
+        print("[DURATION FIX] Cannot fix — missing video or duration info")
+        return {
+            "duration_adjusted": False,
+            "duration_factor": None,
+        }
+    
+    if target_duration <= 0:
+        print("[DURATION FIX] Invalid target duration, skipping")
+        return {
+            "duration_adjusted": False,
+            "duration_factor": None,
+        }
+    
+    factor = actual_duration / target_duration
+    tolerance = 0.20
+    
+    if abs(factor - 1.0) <= tolerance:
+        print(f"[DURATION FIX] Duration within tolerance ({factor:.2f}x), no adjustment needed")
+        return {
+            "duration_adjusted": False,
+            "duration_factor": None,
+        }
+    
+    # setpts multiplier: >1 slows down (stretches), <1 speeds up (compresses)
+    # If video is too long (factor > 1), we need pts < 1 to speed up
+    # If video is too short (factor < 1), we need pts > 1 to slow down
+    pts_factor = target_duration / actual_duration  # inverse of factor
+    
+    max_pts = 2.0  # Cap at 2x slowdown or 2x speedup
+    min_pts = 1.0 / max_pts
+    clamped_pts = max(min_pts, min(max_pts, pts_factor))
+    
+    if clamped_pts != pts_factor:
+        print(f"[DURATION FIX] PTS factor clamped from {pts_factor:.4f} to {clamped_pts:.4f} (range {min_pts}-{max_pts})")
+        pts_factor = clamped_pts
+    
+    if factor > 1.0:
+        print(f"[DURATION FIX] Video is too long ({actual_duration:.1f}s > {target_duration:.1f}s) — speeding up (setpts={pts_factor:.4f}*PTS)")
+    else:
+        print(f"[DURATION FIX] Video is too short ({actual_duration:.1f}s < {target_duration:.1f}s) — slowing down (setpts={pts_factor:.4f}*PTS)")
+    
+    try:
+        temp_dir = tempfile.mkdtemp(prefix="manim_durfix_")
+        adjusted_path = Path(temp_dir) / "duration_adjusted.mp4"
+        
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-filter:v", f"setpts={pts_factor}*PTS",
+            "-an",  # Strip audio since we merge later
+            str(adjusted_path),
+        ]
+        
+        print(f"[DURATION FIX] Running: {' '.join(cmd)}")
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        
+        if result.returncode != 0:
+            print(f"[DURATION FIX] ffmpeg failed: {result.stderr[:300]}")
+            return {
+                "duration_adjusted": False,
+                "duration_factor": None,
+            }
+        
+        if not adjusted_path.exists():
+            print("[DURATION FIX] Output file not created")
+            return {
+                "duration_adjusted": False,
+                "duration_factor": None,
+            }
+        
+        verify_result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "csv=p=0",
+                str(adjusted_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        
+        new_duration = None
+        if verify_result.returncode == 0 and verify_result.stdout.strip():
+            new_duration = float(verify_result.stdout.strip())
+            print(f"[DURATION FIX] Adjusted duration: {new_duration:.1f}s (target: {target_duration:.1f}s)")
+        
+        print(f"[DURATION FIX] Success! Adjusted video: {adjusted_path}")
+        return {
+            "checked_video_path": str(adjusted_path),
+            "duration_adjusted": True,
+            "duration_factor": factor,
+            "actual_duration": new_duration or target_duration,
+        }
+    
+    except subprocess.TimeoutExpired:
+        print("[DURATION FIX] ffmpeg timeout")
+        return {"duration_adjusted": False, "duration_factor": None}
+    except Exception as e:
+        print(f"[DURATION FIX] Error: {e}")
+        return {"duration_adjusted": False, "duration_factor": None}
 
 
 # ============================================================================
@@ -543,25 +709,41 @@ def synchronizer_node(state: VideoGenState) -> dict:
     """
     Synchronize video with transcript timestamps.
     
-    This node receives state from both the video rendering branch and
-    the transcript processing branch. It passes through all relevant data.
+    If the video duration was adjusted, scales all transcript timestamps
+    proportionally so audio cues stay aligned with the visual content.
     
-    Input: checked_video_path, transcript_sections, audio_segments
-    Output: synced_video_path (plus passthrough of audio data)
+    Input: checked_video_path, transcript_sections, audio_segments, duration_factor
+    Output: synced_video_path, transcript_sections (adjusted), audio_segments
     """
     video_path = state.get("checked_video_path")
     audio_segments = state.get("audio_segments", [])
     transcript_sections = state.get("transcript_sections", [])
+    duration_adjusted = state.get("duration_adjusted", False)
+    duration_factor = state.get("duration_factor")
     
     print(f"[SYNC] Video path: {video_path}")
     print(f"[SYNC] Audio segments: {len(audio_segments)}")
     print(f"[SYNC] Transcript sections: {len(transcript_sections)}")
+    print(f"[SYNC] Duration adjusted: {duration_adjusted} (factor: {duration_factor})")
     
-    # Pass through all data - don't drop audio_segments!
+    synced_sections = list(transcript_sections)
+    
+    if duration_adjusted and duration_factor and duration_factor != 1.0:
+        print(f"[SYNC] Scaling transcript timestamps by factor {duration_factor:.4f}")
+        synced_sections = []
+        for section in transcript_sections:
+            adjusted_section = TranscriptSection(
+                timestamp=section["timestamp"] / duration_factor,
+                text=section["text"],
+                audio_path=section.get("audio_path"),
+            )
+            synced_sections.append(adjusted_section)
+        print(f"[SYNC] Adjusted {len(synced_sections)} transcript timestamps")
+    
     return {
         "synced_video_path": video_path,
-        "audio_segments": audio_segments,  # Preserve audio from transcript_processor
-        "transcript_sections": transcript_sections,
+        "audio_segments": audio_segments,
+        "transcript_sections": synced_sections,
     }
 
 
@@ -573,7 +755,8 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
     """
     Merge audio segments with video using ffmpeg.
     
-    Concatenates all audio segments and mixes with video.
+    Places each audio segment at its transcript timestamp position,
+    creating a properly timed narration track that aligns with the video.
     Handles audio/video length mismatches by padding audio with silence.
     
     Input: synced_video_path, audio_segments, transcript_sections
@@ -585,6 +768,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
     
     print(f"[AUDIO MERGE] Video path: {video_path}")
     print(f"[AUDIO MERGE] Audio segments: {len(audio_segments)}")
+    print(f"[AUDIO MERGE] Transcript sections: {len(transcript_sections)}")
     
     if not video_path:
         print("[AUDIO MERGE] No video path provided")
@@ -600,56 +784,216 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
     try:
         temp_dir = tempfile.mkdtemp(prefix="manim_merge_")
         
-        concat_file = Path(temp_dir) / "concat.txt"
+        # Get video duration for padding calculations
+        video_duration = None
+        try:
+            dur_result = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "csv=p=0",
+                    video_path,
+                ],
+                capture_output=True, text=True, timeout=30,
+            )
+            if dur_result.returncode == 0 and dur_result.stdout.strip():
+                video_duration = float(dur_result.stdout.strip())
+                print(f"[AUDIO MERGE] Video duration: {video_duration:.1f}s")
+        except Exception as e:
+            print(f"[AUDIO MERGE] Could not get video duration: {e}")
         
-        with open(concat_file, "w") as f:
-            for audio_path in valid_audio_segments:
-                f.write(f"file '{audio_path}'\n")
+        # Build timestamp-aligned audio using transcript sections
+        # Match audio segments to transcript sections that have audio_path
+        sections_with_audio = []
+        for section in transcript_sections:
+            audio_path = section.get("audio_path")
+            if audio_path and Path(audio_path).exists():
+                sections_with_audio.append(section)
         
-        print(f"[AUDIO MERGE] Created concat file: {concat_file}")
+        print(f"[AUDIO MERGE] Sections with valid audio: {len(sections_with_audio)}")
+        
+        if not sections_with_audio:
+            # Fallback: no timestamp info, use valid_audio_segments directly
+            sections_with_audio = [
+                {"timestamp": 0.0, "audio_path": p}
+                for p in valid_audio_segments
+            ]
         
         merged_audio = Path(temp_dir) / "merged_audio.wav"
-        concat_cmd = [
-            "ffmpeg", "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(concat_file),
-            "-c", "copy",
-            str(merged_audio),
-        ]
         
-        print(f"[AUDIO MERGE] Concatenating audio...")
-        result = subprocess.run(
-            concat_cmd,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
+        if len(sections_with_audio) == 1:
+            # Single segment: just use adelay for its timestamp
+            section = sections_with_audio[0]
+            delay_ms = int(section["timestamp"] * 1000)
+            
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", section["audio_path"],
+                "-af", f"adelay={delay_ms}|{delay_ms}",
+                str(merged_audio),
+            ]
+            print(f"[AUDIO MERGE] Single segment at {section['timestamp']:.1f}s")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                print(f"[AUDIO MERGE] Single adelay failed: {result.stderr[:200]}")
+                # Fallback: just copy
+                import shutil
+                shutil.copy2(section["audio_path"], str(merged_audio))
+        else:
+            # Multiple segments: create silence-padded individual files, then concat
+            # Strategy: for each segment, create a file that has silence from
+            # the end of the previous segment to this segment's timestamp,
+            # then the actual audio. Concatenate all these in order.
+            concat_parts = []
+            
+            for i, section in enumerate(sections_with_audio):
+                timestamp = section["timestamp"]
+                audio_path = section["audio_path"]
+                
+                # Get this audio segment's duration
+                seg_duration = None
+                try:
+                    seg_result = subprocess.run(
+                        [
+                            "ffprobe", "-v", "error",
+                            "-show_entries", "format=duration",
+                            "-of", "csv=p=0",
+                            audio_path,
+                        ],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    if seg_result.returncode == 0 and seg_result.stdout.strip():
+                        seg_duration = float(seg_result.stdout.strip())
+                except Exception:
+                    pass
+                
+                # Calculate how much silence to insert before this segment
+                if i == 0:
+                    prev_end = 0.0
+                else:
+                    prev_section = sections_with_audio[i - 1]
+                    prev_timestamp = prev_section["timestamp"]
+                    # Estimate previous segment's end time
+                    prev_dur_result = subprocess.run(
+                        [
+                            "ffprobe", "-v", "error",
+                            "-show_entries", "format=duration",
+                            "-of", "csv=p=0",
+                            prev_section["audio_path"],
+                        ],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    prev_audio_dur = 0.0
+                    if prev_dur_result.returncode == 0 and prev_dur_result.stdout.strip():
+                        prev_audio_dur = float(prev_dur_result.stdout.strip())
+                    prev_end = prev_timestamp + prev_audio_dur
+                
+                silence_duration = max(0.0, timestamp - prev_end)
+                
+                if silence_duration > 0.05:  # More than 50ms of silence
+                    # Create a silence WAV file
+                    silence_path = Path(temp_dir) / f"silence_{i:03d}.wav"
+                    silence_cmd = [
+                        "ffmpeg", "-y",
+                        "-f", "lavfi", "-i",
+                        f"anullsrc=r=24000:cl=mono:d={silence_duration}",
+                        str(silence_path),
+                    ]
+                    result = subprocess.run(
+                        silence_cmd, capture_output=True, text=True, timeout=30,
+                    )
+                    if result.returncode == 0 and silence_path.exists():
+                        concat_parts.append(str(silence_path))
+                        print(f"[AUDIO MERGE]   Segment {i}: {silence_duration:.1f}s silence, then audio at {timestamp:.1f}s")
+                    else:
+                        print(f"[AUDIO MERGE]   Segment {i}: silence generation failed, skipping gap")
+                else:
+                    print(f"[AUDIO MERGE]   Segment {i}: no gap needed at {timestamp:.1f}s")
+                
+                concat_parts.append(audio_path)
+            
+            if not concat_parts:
+                print("[AUDIO MERGE] No concat parts produced")
+                return {"final_output_path": video_path}
+            
+            # First, normalize all audio files to the same format (PCM s16le, 24kHz, mono)
+            normalized_parts = []
+            for j, part in enumerate(concat_parts):
+                norm_path = Path(temp_dir) / f"norm_{j:03d}.wav"
+                norm_cmd = [
+                    "ffmpeg", "-y",
+                    "-i", part,
+                    "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le",
+                    str(norm_path),
+                ]
+                result = subprocess.run(
+                    norm_cmd, capture_output=True, text=True, timeout=30,
+                )
+                if result.returncode == 0 and norm_path.exists():
+                    normalized_parts.append(str(norm_path))
+                else:
+                    print(f"[AUDIO MERGE] Failed to normalize part {j}: {result.stderr[:100]}")
+            
+            # Concatenate all normalized parts
+            concat_file = Path(temp_dir) / "concat.txt"
+            with open(concat_file, "w") as f:
+                for part_path in normalized_parts:
+                    f.write(f"file '{part_path}'\n")
+            
+            print(f"[AUDIO MERGE] Concatenating {len(normalized_parts)} parts (audio + silence gaps)...")
+            concat_cmd = [
+                "ffmpeg", "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", str(concat_file),
+                "-c", "copy",
+                str(merged_audio),
+            ]
+            result = subprocess.run(
+                concat_cmd, capture_output=True, text=True, timeout=60,
+            )
+            
+            if result.returncode != 0 or not merged_audio.exists():
+                print(f"[AUDIO MERGE] Concat failed: {result.stderr[:200]}")
+                return {"final_output_path": video_path}
         
-        if result.returncode != 0 or not merged_audio.exists():
-            print(f"[AUDIO MERGE] Audio concat failed: {result.stderr}")
-            return {"final_output_path": video_path}
+        # Log merged audio duration
+        try:
+            ma_result = subprocess.run(
+                [
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "csv=p=0",
+                    str(merged_audio),
+                ],
+                capture_output=True, text=True, timeout=10,
+            )
+            if ma_result.returncode == 0 and ma_result.stdout.strip():
+                audio_dur = float(ma_result.stdout.strip())
+                print(f"[AUDIO MERGE] Merged audio duration: {audio_dur:.1f}s")
+        except Exception:
+            pass
         
-        print(f"[AUDIO MERGE] Audio concatenated: {merged_audio}")
+        print(f"[AUDIO MERGE] Timestamp-aligned audio created: {merged_audio}")
         
-        # Merge audio with video using filter_complex to pad audio
+        # Merge audio with video
         # apad pads audio with silence if shorter than video
         final_output = Path(temp_dir) / "final_with_audio.mp4"
         merge_cmd = [
             "ffmpeg", "-y",
             "-i", video_path,
             "-i", str(merged_audio),
-            "-filter_complex", "[1:a]apad[a]",  # Pad audio with silence if needed
+            "-filter_complex", "[1:a]apad[a]",
             "-c:v", "copy",
             "-c:a", "aac",
             "-b:a", "128k",
             "-map", "0:v:0",
             "-map", "[a]",
-            "-shortest",  # Use shortest (video length) since audio is padded
+            "-shortest",
             str(final_output),
         ]
         
-        print(f"[AUDIO MERGE] Merging audio with video...")
+        print(f"[AUDIO MERGE] Merging timestamp-aligned audio with video...")
         result = subprocess.run(
             merge_cmd,
             capture_output=True,
@@ -658,8 +1002,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
         )
         
         if result.returncode != 0:
-            print(f"[AUDIO MERGE] Merge command failed: {result.stderr}")
-            # Try simpler merge without filter_complex as fallback
+            print(f"[AUDIO MERGE] Merge command failed: {result.stderr[:200]}")
             print("[AUDIO MERGE] Trying simple merge fallback...")
             simple_merge_cmd = [
                 "ffmpeg", "-y",
@@ -681,6 +1024,14 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
         if not final_output.exists():
             print(f"[AUDIO MERGE] Final output not created")
             return {"final_output_path": video_path}
+        
+        # Copy to the project output directory for easy access
+        project_output = Path("output")
+        project_output.mkdir(parents=True, exist_ok=True)
+        output_copy = project_output / "output.mp4"
+        import shutil
+        shutil.copy2(str(final_output), str(output_copy))
+        print(f"[AUDIO MERGE] Copied to: {output_copy.resolve()}")
         
         print(f"[AUDIO MERGE] Success! Final output: {final_output}")
         return {"final_output_path": str(final_output)}
@@ -709,6 +1060,26 @@ def should_retry_or_continue(state: VideoGenState) -> Literal["recorrector", "re
     else:
         print("[RETRY] No error, proceeding to render_checker")
     return "render_checker"
+
+
+def should_fix_duration(state: VideoGenState) -> Literal["video_duration_fixer", "synchronizer"]:
+    """Decide whether video duration needs fixing before sync."""
+    actual_duration = state.get("actual_duration")
+    target_duration = state.get("target_duration", state.get("scene_length", 1.0) * 60)
+    
+    if not actual_duration or not target_duration or target_duration <= 0:
+        print("[DURATION CHECK] Missing duration info, skipping fix")
+        return "synchronizer"
+    
+    factor = actual_duration / target_duration
+    tolerance = 0.20
+    
+    if abs(factor - 1.0) > tolerance:
+        print(f"[DURATION CHECK] Duration off by {(factor - 1.0) * 100:+.0f}% — routing to fixer")
+        return "video_duration_fixer"
+    
+    print(f"[DURATION CHECK] Duration OK ({factor:.2f}x) — skipping fix")
+    return "synchronizer"
 
 
 def should_rerender(state: VideoGenState) -> Literal["code_executor", "synchronizer"]:

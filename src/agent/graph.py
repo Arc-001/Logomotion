@@ -11,9 +11,11 @@ from .nodes import (
     recorrector_node,
     transcript_processor_node,
     render_checker_node,
+    video_duration_fixer_node,
     synchronizer_node,
     audio_video_merger_node,
     should_retry_or_continue,
+    should_fix_duration,
 )
 
 
@@ -39,7 +41,9 @@ def build_video_gen_graph() -> StateGraph:
       ▼ rendered video                         │
     [render_checker]                           │
       │                                        │
-      ▼                                        │
+      ├──duration off?──► [video_duration_fixer]│
+      │                          │             │
+      ▼                          ▼             │
     [synchronizer] ◄───────────────────────────┘
       │
       ▼
@@ -55,6 +59,7 @@ def build_video_gen_graph() -> StateGraph:
     builder.add_node("recorrector", recorrector_node)
     builder.add_node("transcript_processor", transcript_processor_node)
     builder.add_node("render_checker", render_checker_node)
+    builder.add_node("video_duration_fixer", video_duration_fixer_node)
     builder.add_node("synchronizer", synchronizer_node)
     builder.add_node("audio_video_merger", audio_video_merger_node)
     
@@ -74,7 +79,18 @@ def build_video_gen_graph() -> StateGraph:
     )
     
     builder.add_edge("recorrector", "code_executor")
-    builder.add_edge("render_checker", "synchronizer")
+    
+    # After render checking, decide if duration needs fixing
+    builder.add_conditional_edges(
+        "render_checker",
+        should_fix_duration,
+        {
+            "video_duration_fixer": "video_duration_fixer",
+            "synchronizer": "synchronizer",
+        }
+    )
+    
+    builder.add_edge("video_duration_fixer", "synchronizer")
     builder.add_edge("transcript_processor", "synchronizer")
     builder.add_edge("synchronizer", "audio_video_merger")
     builder.add_edge("audio_video_merger", END)

@@ -6,33 +6,6 @@ An agentic system that generates narrated mathematical and technical animations 
 
 ![System Architecture](assets/architecture.png)
 
-The pipeline is built as a LangGraph state machine with seven nodes:
-
-```
-START
-  |
-  v
-[video_code_gen] ---- retrieves examples from Graph RAG (Neo4j + ChromaDB)
-  |                                          |
-  v                                          v
-[code_executor]                   [transcript_processor]
-  |                                          |
-  +-- error? --> [recorrector] --+            |   (Kokoro TTS)
-  |              (loops until    |            |
-  |               success or     |            |
-  |               max retries)   |            |
-  v                              |            |
-[render_checker]                              |
-  |                                           |
-  v                                           |
-[synchronizer] <------------------------------+
-  |
-  v
-[audio_video_merger]  (ffmpeg)
-  |
-  v
- END --> final .mp4 with narration
-```
 
 1. **video_code_gen** -- Retrieves similar Manim examples via hybrid search (vector + graph), builds a prompt with positioning/API constraints, and calls the LLM to produce scene code and a timestamped transcript.
 2. **code_executor** -- Writes the code to a temp file and runs `manim render`. On failure, passes the error downstream.

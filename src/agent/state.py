@@ -79,6 +79,11 @@ class VideoGenState(TypedDict):
     
     audio_segments: list[str]  # Paths to audio files
     
+    actual_duration: Optional[float]  # Measured duration of rendered video (seconds)
+    target_duration: float  # Computed target duration (scene_length * 60)
+    duration_adjusted: bool  # Whether video was time-stretched/trimmed
+    duration_factor: Optional[float]  # Factor applied to adjust duration
+    
     final_output_path: Optional[str]
     
     messages: Annotated[list[dict], add]  # Chat history for debugging
@@ -157,6 +162,11 @@ def create_initial_state(
         synced_video_path=None,
         
         audio_segments=[],
+        
+        actual_duration=None,
+        target_duration=scene_length * 60.0,
+        duration_adjusted=False,
+        duration_factor=None,
         
         final_output_path=None,
         
