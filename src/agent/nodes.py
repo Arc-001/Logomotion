@@ -112,7 +112,21 @@ Used animations: {', '.join(result.used_animations)}
         retriever.close()
     
     target_seconds = int(state["scene_length"] * 60)
-    print(f"[CODE GEN] Target duration: {target_seconds} seconds")
+    orientation = state.get("orientation", "landscape")
+    print(f"[CODE GEN] Target duration: {target_seconds} seconds, orientation: {orientation}")
+    
+    if orientation == "portrait":
+        frame_width = "8 units wide (-4 to +4)"
+        frame_height = "14.2 units tall (-7.1 to +7.1)"
+        x_bounds = "[-3.5, 3.5]"
+        y_bounds = "[-6, 6]"
+        layout_note = "Content is tall and narrow (9:16 portrait). Stack elements vertically. Use .arrange(DOWN) for groups."
+    else:
+        frame_width = "14.2 units wide (-7.1 to +7.1)"
+        frame_height = "8 units tall (-4 to +4)"
+        x_bounds = "[-6, 6]"
+        y_bounds = "[-3.5, 3.5]"
+        layout_note = "Content is wide (16:9 landscape). Use full horizontal space. Side-by-side layouts work well."
     
     depth_configs = {
         "basic": {
@@ -140,15 +154,17 @@ Used animations: {', '.join(result.used_animations)}
 **Description:** {state["scene_prompt_description"]}
 **Target Duration:** {target_seconds} seconds ({state["scene_length"]} minutes)
 **Explanation Level:** {depth} - {depth_config["detail_level"]}
+**Orientation:** {orientation} ({frame_width} × {frame_height})
 
 ## CRITICAL REQUIREMENTS (MUST FOLLOW STRICTLY):
 
 ### 1. SCREEN BOUNDS - NEVER GO OUT OF FRAME
-- The Manim frame is 14.2 units wide (-7.1 to +7.1) and 8 units tall (-4 to +4)
+- The Manim frame is {frame_width} and {frame_height}
 - ALWAYS use .scale() to keep objects within bounds (typical scale: 0.5 to 0.8 for text)
-- ALWAYS check positions: x should be in [-6, 6], y should be in [-3.5, 3.5] to leave margins
+- ALWAYS check positions: x should be in {x_bounds}, y should be in {y_bounds} to leave margins
 - For multiple elements, use VGroup and .arrange(DOWN/RIGHT, buff=0.3) then scale the group
 - NEVER animate objects that start or end outside the visible frame
+- {layout_note}
 
 ### 2. POSITIONING - PREVENT ALL OVERLAPS
 - Title: ALWAYS use .to_edge(UP, buff=0.5) with .scale(0.7)
@@ -287,6 +303,8 @@ def code_executor_node(state: VideoGenState) -> dict:
     print(f"[EXECUTOR] Code saved to: {code_path}")
     
     output_dir = Path(temp_dir) / "media"
+    
+    orientation = state.get("orientation", "landscape")
     cmd = [
         "manim", "render",
         str(code_path),
@@ -294,6 +312,10 @@ def code_executor_node(state: VideoGenState) -> dict:
         "-ql",  # Low quality for faster testing
         "--media_dir", str(output_dir),
     ]
+    
+    if orientation == "portrait":
+        cmd.extend(["--resolution", "1080,1920"])
+        print(f"[EXECUTOR] Portrait mode: using resolution 1080x1920")
     
     print(f"[EXECUTOR] Running: {' '.join(cmd)}")
     

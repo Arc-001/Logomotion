@@ -46,6 +46,10 @@ class GenerateRequest(BaseModel):
         os.getenv("EXPLANATION_DEPTH", "detailed"),
         description="How detailed the explanation should be",
     )
+    orientation: Literal["landscape", "portrait"] = Field(
+        os.getenv("VIDEO_ORIENTATION", "landscape"),
+        description="Video orientation: landscape (16:9) or portrait (9:16)",
+    )
 
     @model_validator(mode="after")
     def require_prompt_or_topic(self):
@@ -116,6 +120,7 @@ async def generate_video(request: GenerateRequest, background_tasks: BackgroundT
         request.title,
         request.length,
         request.depth,
+        request.orientation,
     )
 
     return GenerateResponse(
@@ -192,6 +197,7 @@ async def _run_generation_job(
     title: Optional[str],
     length: float,
     depth: str,
+    orientation: str,
 ):
     """Background task to run video generation."""
     from .agent.graph import generate_video
@@ -204,6 +210,7 @@ async def _run_generation_job(
             scene_prompt_description=prompt,
             scene_length=length,
             explanation_depth=depth,
+            orientation=orientation,
         )
 
         video_path = result.get("final_output_path") or result.get("rendered_video_path")

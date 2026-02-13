@@ -53,6 +53,7 @@ class VideoGenState(TypedDict):
     scene_prompt_description: str
     scene_length: float
     explanation_depth: str  # "basic", "detailed", or "comprehensive"
+    orientation: str  # "landscape" or "portrait"
     
     retrieved_examples: list[str]  # Code examples from Graph RAG
     retrieved_context: str  # Formatted context for LLM
@@ -94,6 +95,7 @@ def create_initial_state(
     scene_prompt_description: str,
     scene_length: float = 1.0,
     explanation_depth: str = "detailed",
+    orientation: str = "landscape",
     system_message: Optional[str] = None,
     max_retries: Optional[int] = None,
 ) -> VideoGenState:
@@ -101,7 +103,15 @@ def create_initial_state(
     # Read MAX_RETRIES from environment, default to 3
     if max_retries is None:
         max_retries = int(os.getenv("MAX_RETRIES", "3"))
-    default_system = """You are an expert Manim animator creating educational math videos. Follow these CRITICAL guidelines:
+    
+    if orientation == "portrait":
+        frame_desc = "8 units wide (-4 to +4) and 14.2 units tall (-7.1 to +7.1)"
+        layout_hint = "Screen layout: UP for titles, CENTER for visuals, DOWN for equations. Content is tall and narrow."
+    else:
+        frame_desc = "14.2 units wide (-7.1 to +7.1) and 8 units tall (-4 to +4)"
+        layout_hint = "Screen layout: UP for titles, LEFT for visuals, RIGHT for equations."
+    
+    default_system = f"""You are an expert Manim animator creating educational math videos. Follow these CRITICAL guidelines:
 
 ## VIDEO LENGTH
 - Target video duration is specified in minutes. Calculate total time needed.
@@ -111,12 +121,13 @@ def create_initial_state(
 
 ## ELEMENT POSITIONING (CRITICAL - AVOID OVERLAPS)
 - NEVER place elements at the same position. Always use explicit positioning.
+- The Manim frame is {frame_desc}.
 - Use .to_edge(UP/DOWN/LEFT/RIGHT) to anchor elements to screen edges.
 - Use .next_to(other_mobject, direction, buff=0.5) to position relative to others.
 - Use .shift(direction * amount) to move elements.
 - Group related elements with VGroup() and position the group.
 - Clear previous elements with FadeOut() before showing new ones in the same area.
-- Screen layout: UP for titles, LEFT for visuals, RIGHT for equations.
+- {layout_hint}
 
 ## ANIMATION QUALITY
 - Always FadeOut or Transform old elements before introducing new ones.
@@ -137,6 +148,7 @@ def create_initial_state(
         scene_prompt_description=scene_prompt_description,
         scene_length=scene_length,
         explanation_depth=explanation_depth,
+        orientation=orientation,
         
         retrieved_examples=[],
         retrieved_context="",

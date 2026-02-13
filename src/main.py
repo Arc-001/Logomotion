@@ -44,15 +44,18 @@ def cmd_generate(args):
     default_length = float(os.getenv("VIDEO_LENGTH", "1.0"))
     explanation_depth = args.depth or os.getenv("EXPLANATION_DEPTH", "detailed")
     scene_length = args.length if args.length != 1.0 else default_length
+    orientation = args.orientation or os.getenv("VIDEO_ORIENTATION", "landscape")
     
     print(f"[CONFIG] Scene length: {scene_length} minutes ({scene_length * 60} seconds)")
     print(f"[CONFIG] Explanation depth: {explanation_depth}")
+    print(f"[CONFIG] Orientation: {orientation}")
     
     result = generate_video_sync(
         scene_title=args.title or "Generated Scene",
         scene_prompt_description=args.prompt,
         scene_length=scene_length,
         explanation_depth=explanation_depth,
+        orientation=orientation,
     )
     
     if result.get("final_output_path"):
@@ -133,6 +136,12 @@ def main():
         "--depth", "-d",
         choices=["basic", "detailed", "comprehensive"],
         help="Explanation depth level (default: from .env or 'detailed')",
+    )
+    gen_parser.add_argument(
+        "--orientation", "-O",
+        choices=["landscape", "portrait"],
+        default=None,
+        help="Video orientation (default: from .env or 'landscape')",
     )
     
     serve_parser = subparsers.add_parser("serve", help="Start the API server")
