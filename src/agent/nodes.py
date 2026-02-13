@@ -862,89 +862,17 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
                 import shutil
                 shutil.copy2(section["audio_path"], str(merged_audio))
         else:
-            # Multiple segments: create silence-padded individual files, then concat
-            # Strategy: for each segment, create a file that has silence from
-            # the end of the previous segment to this segment's timestamp,
-            # then the actual audio. Concatenate all these in order.
-            concat_parts = []
+            # Multiple segments: use adelay to place each at its absolute
+            # timestamp, then amix to combine them into one track.
+            # This avoids cumulative drift from concat-based silence padding.
             
+            # First, normalize all audio segments to the same format
+            norm_paths = []
             for i, section in enumerate(sections_with_audio):
-                timestamp = section["timestamp"]
-                audio_path = section["audio_path"]
-                
-                # Get this audio segment's duration
-                seg_duration = None
-                try:
-                    seg_result = subprocess.run(
-                        [
-                            "ffprobe", "-v", "error",
-                            "-show_entries", "format=duration",
-                            "-of", "csv=p=0",
-                            audio_path,
-                        ],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    if seg_result.returncode == 0 and seg_result.stdout.strip():
-                        seg_duration = float(seg_result.stdout.strip())
-                except Exception:
-                    pass
-                
-                # Calculate how much silence to insert before this segment
-                if i == 0:
-                    prev_end = 0.0
-                else:
-                    prev_section = sections_with_audio[i - 1]
-                    prev_timestamp = prev_section["timestamp"]
-                    # Estimate previous segment's end time
-                    prev_dur_result = subprocess.run(
-                        [
-                            "ffprobe", "-v", "error",
-                            "-show_entries", "format=duration",
-                            "-of", "csv=p=0",
-                            prev_section["audio_path"],
-                        ],
-                        capture_output=True, text=True, timeout=10,
-                    )
-                    prev_audio_dur = 0.0
-                    if prev_dur_result.returncode == 0 and prev_dur_result.stdout.strip():
-                        prev_audio_dur = float(prev_dur_result.stdout.strip())
-                    prev_end = prev_timestamp + prev_audio_dur
-                
-                silence_duration = max(0.0, timestamp - prev_end)
-                
-                if silence_duration > 0.05:  # More than 50ms of silence
-                    # Create a silence WAV file
-                    silence_path = Path(temp_dir) / f"silence_{i:03d}.wav"
-                    silence_cmd = [
-                        "ffmpeg", "-y",
-                        "-f", "lavfi", "-i",
-                        f"anullsrc=r=24000:cl=mono:d={silence_duration}",
-                        str(silence_path),
-                    ]
-                    result = subprocess.run(
-                        silence_cmd, capture_output=True, text=True, timeout=30,
-                    )
-                    if result.returncode == 0 and silence_path.exists():
-                        concat_parts.append(str(silence_path))
-                        print(f"[AUDIO MERGE]   Segment {i}: {silence_duration:.1f}s silence, then audio at {timestamp:.1f}s")
-                    else:
-                        print(f"[AUDIO MERGE]   Segment {i}: silence generation failed, skipping gap")
-                else:
-                    print(f"[AUDIO MERGE]   Segment {i}: no gap needed at {timestamp:.1f}s")
-                
-                concat_parts.append(audio_path)
-            
-            if not concat_parts:
-                print("[AUDIO MERGE] No concat parts produced")
-                return {"final_output_path": video_path}
-            
-            # First, normalize all audio files to the same format (PCM s16le, 24kHz, mono)
-            normalized_parts = []
-            for j, part in enumerate(concat_parts):
-                norm_path = Path(temp_dir) / f"norm_{j:03d}.wav"
+                norm_path = Path(temp_dir) / f"norm_{i:03d}.wav"
                 norm_cmd = [
                     "ffmpeg", "-y",
-                    "-i", part,
+                    "-i", section["audio_path"],
                     "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le",
                     str(norm_path),
                 ]
@@ -952,31 +880,47 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
                     norm_cmd, capture_output=True, text=True, timeout=30,
                 )
                 if result.returncode == 0 and norm_path.exists():
-                    normalized_parts.append(str(norm_path))
+                    norm_paths.append((section["timestamp"], str(norm_path)))
+                    print(f"[AUDIO MERGE]   Segment {i}: positioned at {section['timestamp']:.1f}s")
                 else:
-                    print(f"[AUDIO MERGE] Failed to normalize part {j}: {result.stderr[:100]}")
+                    print(f"[AUDIO MERGE]   Segment {i}: normalization failed, skipping")
             
-            # Concatenate all normalized parts
-            concat_file = Path(temp_dir) / "concat.txt"
-            with open(concat_file, "w") as f:
-                for part_path in normalized_parts:
-                    f.write(f"file '{part_path}'\n")
+            if not norm_paths:
+                print("[AUDIO MERGE] No normalized segments produced")
+                return {"final_output_path": video_path}
             
-            print(f"[AUDIO MERGE] Concatenating {len(normalized_parts)} parts (audio + silence gaps)...")
-            concat_cmd = [
+            # Build ffmpeg command with adelay filters for absolute positioning
+            inputs = []
+            filter_parts = []
+            for i, (timestamp, path) in enumerate(norm_paths):
+                inputs.extend(["-i", path])
+                delay_ms = int(timestamp * 1000)
+                # adelay places this segment at the exact timestamp
+                filter_parts.append(f"[{i}:a]adelay={delay_ms}|{delay_ms}[a{i}]")
+            
+            # Mix all delayed segments together
+            mix_inputs = "".join(f"[a{i}]" for i in range(len(norm_paths)))
+            filter_parts.append(
+                f"{mix_inputs}amix=inputs={len(norm_paths)}:duration=longest:normalize=0[out]"
+            )
+            filter_graph = ";".join(filter_parts)
+            
+            mix_cmd = [
                 "ffmpeg", "-y",
-                "-f", "concat",
-                "-safe", "0",
-                "-i", str(concat_file),
-                "-c", "copy",
+                *inputs,
+                "-filter_complex", filter_graph,
+                "-map", "[out]",
+                "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le",
                 str(merged_audio),
             ]
+            
+            print(f"[AUDIO MERGE] Mixing {len(norm_paths)} segments with adelay positioning...")
             result = subprocess.run(
-                concat_cmd, capture_output=True, text=True, timeout=60,
+                mix_cmd, capture_output=True, text=True, timeout=60,
             )
             
             if result.returncode != 0 or not merged_audio.exists():
-                print(f"[AUDIO MERGE] Concat failed: {result.stderr[:200]}")
+                print(f"[AUDIO MERGE] Adelay mix failed: {result.stderr[:200]}")
                 return {"final_output_path": video_path}
         
         # Log merged audio duration
