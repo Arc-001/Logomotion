@@ -5,7 +5,6 @@ Provides HTTP endpoints for video generation with full control
 over length, depth, and topic.
 """
 
-import os
 import uuid
 from typing import Optional, Literal
 from pathlib import Path
@@ -13,6 +12,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, model_validator
+
+from .config import get_settings
 
 app = FastAPI(
     title="Manim Graph RAG Agent",
@@ -37,27 +38,33 @@ class GenerateRequest(BaseModel):
     )
     title: Optional[str] = Field(None, description="Scene title")
     length: float = Field(
-        float(os.getenv("VIDEO_LENGTH", "1.0")),
+        default=None,
         ge=0.1,
         le=30.0,
         description="Target video length in minutes",
     )
     depth: Literal["basic", "detailed", "comprehensive"] = Field(
-        os.getenv("EXPLANATION_DEPTH", "detailed"),
+        default=None,
         description="How detailed the explanation should be",
     )
     orientation: Literal["landscape", "portrait"] = Field(
-        os.getenv("VIDEO_ORIENTATION", "landscape"),
+        default=None,
         description="Video orientation: landscape (16:9) or portrait (9:16)",
     )
 
     @model_validator(mode="after")
-    def require_prompt_or_topic(self):
+    def apply_defaults_and_validate(self):
+        settings = get_settings()
         if not self.prompt and not self.topic:
             raise ValueError("Either 'prompt' or 'topic' must be provided")
-        # Normalise: ensure prompt is always populated
         if not self.prompt:
             self.prompt = self.topic
+        if self.length is None:
+            self.length = settings.video_length
+        if self.depth is None:
+            self.depth = settings.explanation_depth
+        if self.orientation is None:
+            self.orientation = settings.video_orientation
         return self
 
 

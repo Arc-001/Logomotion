@@ -3,9 +3,7 @@ Knowledge Graph Schema for Manim Code.
 
 Defines the structure of nodes and relationships in the knowledge graph:
 - ManimClass: Classes like Scene, Circle, Square
-- ManimFunction: Functions and methods  
 - Animation: Animation types like Write, FadeIn, Transform
-- Import: Import statements and modules
 - Example: Complete code examples from the dataset
 """
 
@@ -17,22 +15,20 @@ from pydantic import BaseModel, Field
 class NodeType(str, Enum):
     """Types of nodes in the Manim knowledge graph."""
     MANIM_CLASS = "ManimClass"
-    MANIM_FUNCTION = "ManimFunction"
     ANIMATION = "Animation"
-    IMPORT = "Import"
     EXAMPLE = "Example"
-    CONCEPT = "Concept"  # Mathematical/visual concepts like "vector field", "3D"
+    CONCEPT = "Concept"
 
 
 class RelationType(str, Enum):
     """Types of relationships between nodes."""
-    USES = "USES"  # Example uses a class/function
-    INHERITS_FROM = "INHERITS_FROM"  # Class inheritance
-    ANIMATES = "ANIMATES"  # Animation applied to object
-    IMPORTS = "IMPORTS"  # Code imports module
-    SIMILAR_TO = "SIMILAR_TO"  # Semantic similarity
-    DEMONSTRATES = "DEMONSTRATES"  # Example demonstrates concept
-    BELONGS_TO = "BELONGS_TO"  # Function belongs to class
+    USES = "USES"
+    INHERITS_FROM = "INHERITS_FROM"
+    ANIMATES = "ANIMATES"
+    IMPORTS = "IMPORTS"
+    SIMILAR_TO = "SIMILAR_TO"
+    DEMONSTRATES = "DEMONSTRATES"
+    BELONGS_TO = "BELONGS_TO"
 
 
 class ManimClassNode(BaseModel):
@@ -44,25 +40,11 @@ class ManimClassNode(BaseModel):
     is_mobject: bool = Field(default=False, description="Whether this is a Mobject")
 
 
-class ManimFunctionNode(BaseModel):
-    """Represents a Manim function or method."""
-    name: str = Field(..., description="Function name")
-    parent_class: Optional[str] = Field(None, description="Parent class if method")
-    signature: Optional[str] = Field(None, description="Function signature")
-    description: Optional[str] = Field(None, description="What this function does")
-
-
 class AnimationNode(BaseModel):
     """Represents a Manim animation type."""
     name: str = Field(..., description="Animation name (Write, FadeIn, etc.)")
     description: Optional[str] = Field(None, description="What this animation does")
     duration_default: Optional[float] = Field(None, description="Default duration")
-
-
-class ImportNode(BaseModel):
-    """Represents an import statement."""
-    statement: str = Field(..., description="Full import statement")
-    module: str = Field(..., description="Module being imported")
 
 
 class ExampleNode(BaseModel):
@@ -72,13 +54,6 @@ class ExampleNode(BaseModel):
     code: str = Field(..., description="The generated Manim code")
     scene_class: Optional[str] = Field(None, description="Main scene class name")
     embedding_id: Optional[str] = Field(None, description="ID in vector store")
-
-
-class ConceptNode(BaseModel):
-    """Represents a mathematical or visual concept."""
-    name: str = Field(..., description="Concept name")
-    category: str = Field(default="general", description="Category (math, physics, etc.)")
-    description: Optional[str] = Field(None, description="Concept description")
 
 
 # Cypher queries for Neo4j schema creation

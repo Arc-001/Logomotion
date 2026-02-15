@@ -41,25 +41,41 @@ class ManimExecutor:
         self.timeout = timeout
     
     @staticmethod
-    def _resolve_manim_cmd() -> str:
-        """Auto-discover the manim binary.
-        
+    def _is_manim_runnable(path: str) -> bool:
+        """Check if a manim binary is actually runnable (valid shebang, etc.)."""
+        try:
+            result = subprocess.run(
+                [path, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return False
+
+    @classmethod
+    def _resolve_manim_cmd(cls) -> str:
+        """Auto-discover a working manim binary.
+
         Search order:
           1. Same bin/ directory as the running Python interpreter (venv)
           2. ~/.local/bin/manim
           3. Fall back to bare 'manim' (relies on PATH)
+
+        Each candidate is tested with ``manim --version`` to guard
+        against stale shebangs or broken installs.
         """
-        # 1. Check venv bin directory (sibling of sys.executable)
-        venv_bin = Path(sys.executable).parent / "manim"
-        if venv_bin.is_file():
-            return str(venv_bin)
-        
-        # 2. Check ~/.local/bin
-        local_bin = Path.home() / ".local" / "bin" / "manim"
-        if local_bin.is_file():
-            return str(local_bin)
-        
-        # 3. Fallback
+        candidates = [
+            Path(sys.executable).parent / "manim",
+            Path.home() / ".local" / "bin" / "manim",
+        ]
+
+        for candidate in candidates:
+            if candidate.is_file() and cls._is_manim_runnable(str(candidate)):
+                return str(candidate)
+
+        # Fallback — let the OS resolve it via PATH
         return "manim"
     
     @staticmethod
@@ -87,6 +103,7 @@ class ManimExecutor:
         code: str,
         scene_class_name: str,
         output_name: Optional[str] = None,
+        orientation: str = "landscape",
     ) -> ExecutionResult:
         """
         Execute Manim code and return the result.
@@ -116,6 +133,9 @@ class ManimExecutor:
                 f"-q{self.quality}",
                 "--media_dir", str(output_dir),
             ]
+
+            if orientation == "portrait":
+                cmd.extend(["--resolution", "1080,1920"])
             
             result = subprocess.run(
                 cmd,
@@ -241,17 +261,19 @@ def execute_manim(
     output_dir: Optional[str] = None,
     quality: str = "l",
     timeout: int = 120,
+    orientation: str = "landscape",
 ) -> ExecutionResult:
     """
     Convenience function to execute Manim code.
-    
+
     Args:
         code: Python code with Manim Scene
         scene_class_name: Name of the Scene class
         output_dir: Optional output directory
         quality: Render quality (l/m/h)
         timeout: Execution timeout in seconds
-    
+        orientation: Video orientation (landscape/portrait)
+
     Returns:
         ExecutionResult with success status and paths
     """
@@ -260,4 +282,4 @@ def execute_manim(
         quality=quality,
         timeout=timeout,
     )
-    return executor.execute(code, scene_class_name)
+    return executor.execute(code, scene_class_name, orientation=orientation)

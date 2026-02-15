@@ -8,10 +8,11 @@ Based on the architecture diagram:
 - Video synchronization and merging
 """
 
-import os
 from typing import Optional, Annotated
 from typing_extensions import TypedDict
 from operator import add
+
+from ..config import get_settings
 
 
 class VideoGenInput(TypedDict):
@@ -100,9 +101,8 @@ def create_initial_state(
     max_retries: Optional[int] = None,
 ) -> VideoGenState:
     """Create initial state for the workflow."""
-    # Read MAX_RETRIES from environment, default to 3
     if max_retries is None:
-        max_retries = int(os.getenv("MAX_RETRIES", "3"))
+        max_retries = get_settings().max_retries
     
     if orientation == "portrait":
         frame_desc = "8 units wide (-4 to +4) and 14.2 units tall (-7.1 to +7.1)"

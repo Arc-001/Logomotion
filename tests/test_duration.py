@@ -27,18 +27,7 @@ def create_test_video(duration_seconds: float, output_path: str) -> bool:
     return result.returncode == 0 and Path(output_path).exists()
 
 
-def get_video_duration(path: str) -> float:
-    """Get video duration in seconds using ffprobe."""
-    result = subprocess.run(
-        [
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "csv=p=0",
-            path,
-        ],
-        capture_output=True, text=True, timeout=30,
-    )
-    return float(result.stdout.strip())
+from src.manim_runner.validator import get_video_duration
 
 
 @pytest.fixture
@@ -184,46 +173,48 @@ class TestSynchronizerTimestampScaling:
     """Tests for transcript timestamp adjustment in synchronizer_node."""
 
     def test_scales_timestamps_on_slowdown(self):
-        """When video is slowed by 0.5x, timestamps should double."""
+        """When video is slowed 2x (speed_ratio=2.0), timestamps should double."""
         sections = [
             {"timestamp": 0.0, "text": "Intro", "audio_path": None},
             {"timestamp": 5.0, "text": "Middle", "audio_path": None},
             {"timestamp": 10.0, "text": "End", "audio_path": None},
         ]
-        factor = 0.5  # Video was slowed (factor < 1 means video shorter than target originally)
+        # speed_ratio = adjusted_dur / original_dur = 2.0 (video now twice as long)
+        speed_ratio = 2.0
 
         adjusted = []
         for s in sections:
             adjusted.append({
-                "timestamp": s["timestamp"] / factor,
+                "timestamp": s["timestamp"] * speed_ratio,
                 "text": s["text"],
                 "audio_path": s.get("audio_path"),
             })
 
         assert adjusted[0]["timestamp"] == 0.0
-        assert adjusted[1]["timestamp"] == 10.0  # 5.0 / 0.5
-        assert adjusted[2]["timestamp"] == 20.0  # 10.0 / 0.5
+        assert adjusted[1]["timestamp"] == 10.0  # 5.0 * 2.0
+        assert adjusted[2]["timestamp"] == 20.0  # 10.0 * 2.0
 
     def test_scales_timestamps_on_speedup(self):
-        """When video is sped up by 2x, timestamps should halve."""
+        """When video is sped up 2x (speed_ratio=0.5), timestamps should halve."""
         sections = [
             {"timestamp": 0.0, "text": "Intro", "audio_path": None},
             {"timestamp": 10.0, "text": "Middle", "audio_path": None},
             {"timestamp": 20.0, "text": "End", "audio_path": None},
         ]
-        factor = 2.0  # Video was sped up (factor > 1 means video longer than target)
+        # speed_ratio = adjusted_dur / original_dur = 0.5 (video now half as long)
+        speed_ratio = 0.5
 
         adjusted = []
         for s in sections:
             adjusted.append({
-                "timestamp": s["timestamp"] / factor,
+                "timestamp": s["timestamp"] * speed_ratio,
                 "text": s["text"],
                 "audio_path": s.get("audio_path"),
             })
 
         assert adjusted[0]["timestamp"] == 0.0
-        assert adjusted[1]["timestamp"] == 5.0  # 10.0 / 2.0
-        assert adjusted[2]["timestamp"] == 10.0  # 20.0 / 2.0
+        assert adjusted[1]["timestamp"] == 5.0  # 10.0 * 0.5
+        assert adjusted[2]["timestamp"] == 10.0  # 20.0 * 0.5
 
     def test_no_scaling_when_not_adjusted(self):
         """Timestamps should remain unchanged when no duration adjustment was made."""

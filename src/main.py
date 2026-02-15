@@ -4,28 +4,32 @@ Main entry point for the Manim Graph RAG Agent.
 CLI commands:
 - index: Index the JSONL dataset into Graph RAG
 - generate: Generate a Manim video from a prompt
+- serve: Start the API server
 """
 
-import os
 import argparse
+import shutil
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
+from .config import get_settings
+
 
 def cmd_index(args):
     """Index the Manim dataset."""
     from .graph_rag.indexer import ManimIndexer, IndexerConfig
-    
+
+    settings = get_settings()
     config = IndexerConfig(
-        neo4j_uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
-        neo4j_user=os.getenv("NEO4J_USER", "neo4j"),
-        neo4j_password=os.getenv("NEO4J_PASSWORD", "password"),
-        chroma_persist_dir=os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db"),
+        neo4j_uri=settings.neo4j_uri,
+        neo4j_user=settings.neo4j_user,
+        neo4j_password=settings.neo4j_password,
+        chroma_persist_dir=settings.chroma_persist_dir,
     )
-    
+
     indexer = ManimIndexer(config)
     try:
         count = indexer.index_directory(args.data)
@@ -37,19 +41,20 @@ def cmd_index(args):
 def cmd_generate(args):
     """Generate a Manim video."""
     from .agent.graph import generate_video_sync
-    
+
+    settings = get_settings()
+
     print(f"Generating video for: {args.prompt}")
     print("-" * 50)
-    
-    default_length = float(os.getenv("VIDEO_LENGTH", "1.0"))
-    explanation_depth = args.depth or os.getenv("EXPLANATION_DEPTH", "detailed")
-    scene_length = args.length if args.length != 1.0 else default_length
-    orientation = args.orientation or os.getenv("VIDEO_ORIENTATION", "landscape")
-    
+
+    scene_length = args.length if args.length != 1.0 else settings.video_length
+    explanation_depth = args.depth or settings.explanation_depth
+    orientation = args.orientation or settings.video_orientation
+
     print(f"[CONFIG] Scene length: {scene_length} minutes ({scene_length * 60} seconds)")
     print(f"[CONFIG] Explanation depth: {explanation_depth}")
     print(f"[CONFIG] Orientation: {orientation}")
-    
+
     result = generate_video_sync(
         scene_title=args.title or "Generated Scene",
         scene_prompt_description=args.prompt,
@@ -57,7 +62,7 @@ def cmd_generate(args):
         explanation_depth=explanation_depth,
         orientation=orientation,
     )
-    
+
     if result.get("final_output_path"):
         print(f"\n✓ Video generated: {result['final_output_path']}")
     elif result.get("rendered_video_path"):
@@ -66,19 +71,18 @@ def cmd_generate(args):
         print("\n✗ Video generation failed")
         if result.get("error"):
             print(f"Error: {result['error']}")
-    
+
     if args.output and result.get("code"):
         output_dir = Path(args.output)
         output_dir.mkdir(parents=True, exist_ok=True)
-        
+
         code_path = output_dir / "scene.py"
         with open(code_path, "w") as f:
             f.write(result["code"])
         print(f"✓ Code saved: {code_path}")
-        
-        if result.get("final_output_path") or result.get("rendered_video_path"):
-            import shutil
-            video_src = result.get("final_output_path") or result["rendered_video_path"]
+
+        video_src = result.get("final_output_path") or result.get("rendered_video_path")
+        if video_src:
             video_dst = output_dir / "output.mp4"
             shutil.copy2(video_src, video_dst)
             print(f"✓ Video saved: {video_dst}")
@@ -89,7 +93,7 @@ def cmd_serve(args):
     try:
         import uvicorn
         from .api import app
-        
+
         print(f"Starting server on http://{args.host}:{args.port}")
         uvicorn.run(app, host=args.host, port=args.port)
     except ImportError:
@@ -102,16 +106,16 @@ def main():
         prog="manim-agent",
         description="Manim Graph RAG Agent - Generate mathematical animations",
     )
-    
+
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
-    
+
     index_parser = subparsers.add_parser("index", help="Index the JSONL dataset")
     index_parser.add_argument(
         "--data", "-d",
         required=True,
         help="Path to directory containing JSONL files",
     )
-    
+
     gen_parser = subparsers.add_parser("generate", help="Generate a Manim video")
     gen_parser.add_argument(
         "--prompt", "-p",
@@ -133,7 +137,7 @@ def main():
         help="Output directory for generated files",
     )
     gen_parser.add_argument(
-        "--depth", "-d",
+        "--depth",
         choices=["basic", "detailed", "comprehensive"],
         help="Explanation depth level (default: from .env or 'detailed')",
     )
@@ -143,7 +147,7 @@ def main():
         default=None,
         help="Video orientation (default: from .env or 'landscape')",
     )
-    
+
     serve_parser = subparsers.add_parser("serve", help="Start the API server")
     serve_parser.add_argument(
         "--host",
@@ -156,9 +160,9 @@ def main():
         default=8000,
         help="Port to bind to (default: 8000)",
     )
-    
+
     args = parser.parse_args()
-    
+
     if args.command == "index":
         cmd_index(args)
     elif args.command == "generate":

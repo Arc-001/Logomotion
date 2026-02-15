@@ -7,14 +7,15 @@ Implements the following nodes from the architecture diagram:
 3. recorrector_node - Fixes code based on error feedback
 4. transcript_processor_node - Splits transcript into sections
 5. render_checker_node - Validates rendered video
-6. synchronizer_node - Aligns video with transcript
-7. audio_video_merger_node - Final merge
+6. video_duration_fixer_node - Adjusts video duration with ffmpeg
+7. synchronizer_node - Aligns video with transcript
+8. audio_video_merger_node - Final merge
 """
 
 import re
-import os
-import tempfile
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -26,7 +27,10 @@ except ImportError:
     OPENAI_AVAILABLE = False
 
 from .state import VideoGenState, TranscriptSection
+from ..config import get_settings
 from ..graph_rag.retriever import ManimRetriever
+from ..manim_runner.executor import ManimExecutor
+from ..manim_runner.validator import get_video_duration
 
 
 # ============================================================================
@@ -37,14 +41,12 @@ def get_llm_client() -> Optional["OpenAI"]:
     """Get OpenRouter client configured from environment."""
     if not OPENAI_AVAILABLE:
         return None
-    
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-    
-    if not api_key:
+
+    settings = get_settings()
+    if not settings.openrouter_api_key:
         return None
-    
-    return OpenAI(base_url=base_url, api_key=api_key)
+
+    return OpenAI(base_url=settings.openrouter_base_url, api_key=settings.openrouter_api_key)
 
 
 def llm_chat(messages: list[dict], temperature: float = 0.2) -> Optional[str]:
@@ -52,16 +54,16 @@ def llm_chat(messages: list[dict], temperature: float = 0.2) -> Optional[str]:
     client = get_llm_client()
     if not client:
         return None
-    
-    model = os.getenv("OPENROUTER_MODEL", "google/gemini-3-flash-preview")
-    
+
+    settings = get_settings()
+
     try:
         completion = client.chat.completions.create(
             extra_headers={
                 "HTTP-Referer": "https://manim-agent.local",
                 "X-Title": "Manim Graph RAG Agent",
             },
-            model=model,
+            model=settings.openrouter_model,
             messages=messages,
             temperature=temperature,
         )
@@ -72,25 +74,75 @@ def llm_chat(messages: list[dict], temperature: float = 0.2) -> Optional[str]:
 
 
 # ============================================================================
+# Shared helpers
+# ============================================================================
+
+def _extract_code_block(text: str) -> str:
+    """Extract Python code from an LLM response containing markdown fences.
+
+    Tries CODE_START/CODE_END markers first, then ```python, then bare ```.
+    Falls back to the raw text if no fences are found.
+    """
+    # 1. Explicit markers
+    marker_match = re.search(r'# CODE_START\n(.*?)# CODE_END', text, re.DOTALL)
+    if marker_match:
+        return marker_match.group(1).strip()
+
+    # 2. ```python block
+    py_match = re.search(r'```python\n(.*?)```', text, re.DOTALL)
+    if py_match:
+        return py_match.group(1).strip()
+
+    # 3. Generic ``` block
+    generic_match = re.search(r'```\n?(.*?)```', text, re.DOTALL)
+    if generic_match:
+        return generic_match.group(1).strip()
+
+    return text.strip()
+
+
+# ============================================================================
+# DEPTH CONFIG — used by code gen prompt
+# ============================================================================
+
+DEPTH_CONFIGS = {
+    "basic": {
+        "detail_level": "high-level overview with key points only",
+        "transcript_density": "entries every 10-15 seconds",
+        "animation_style": "quick transitions, minimal pauses",
+    },
+    "detailed": {
+        "detail_level": "step-by-step explanation with examples",
+        "transcript_density": "entries every 5-10 seconds",
+        "animation_style": "moderate pacing with clear transitions",
+    },
+    "comprehensive": {
+        "detail_level": "thorough in-depth explanation with multiple examples and edge cases",
+        "transcript_density": "entries every 3-5 seconds",
+        "animation_style": "slow, educational pacing with extended pauses for understanding",
+    },
+}
+
+
+# ============================================================================
 # NODE 1: Video Code Generator (with Graph RAG)
 # ============================================================================
 
 def video_code_gen_node(state: VideoGenState) -> dict:
     """
     Generate Manim code using Graph RAG for context.
-    
+
     Input: system_message, scene_title, scene_prompt_description
     Output: code, transcript, retrieved_examples, retrieved_context
     """
     retriever = ManimRetriever()
-    
+
     try:
-        # Hybrid search for relevant examples
         results = retriever.hybrid_search(
             query=state["scene_prompt_description"],
             limit=3,
         )
-        
+
         context_parts = []
         example_ids = []
         for result in results:
@@ -103,18 +155,18 @@ def video_code_gen_node(state: VideoGenState) -> dict:
 Used classes: {', '.join(result.used_classes)}
 Used animations: {', '.join(result.used_animations)}
 """)
-        
+
         retrieved_context = "\n---\n".join(context_parts) if context_parts else "No similar examples found."
     except Exception as e:
         example_ids = []
         retrieved_context = f"RAG retrieval failed: {e}"
     finally:
         retriever.close()
-    
+
     target_seconds = int(state["scene_length"] * 60)
     orientation = state.get("orientation", "landscape")
     print(f"[CODE GEN] Target duration: {target_seconds} seconds, orientation: {orientation}")
-    
+
     if orientation == "portrait":
         frame_width = "8 units wide (-4 to +4)"
         frame_height = "14.2 units tall (-7.1 to +7.1)"
@@ -127,27 +179,10 @@ Used animations: {', '.join(result.used_animations)}
         x_bounds = "[-6, 6]"
         y_bounds = "[-3.5, 3.5]"
         layout_note = "Content is wide (16:9 landscape). Use full horizontal space. Side-by-side layouts work well."
-    
-    depth_configs = {
-        "basic": {
-            "detail_level": "high-level overview with key points only",
-            "transcript_density": "entries every 10-15 seconds",
-            "animation_style": "quick transitions, minimal pauses",
-        },
-        "detailed": {
-            "detail_level": "step-by-step explanation with examples",
-            "transcript_density": "entries every 5-10 seconds",
-            "animation_style": "moderate pacing with clear transitions",
-        },
-        "comprehensive": {
-            "detail_level": "thorough in-depth explanation with multiple examples and edge cases",
-            "transcript_density": "entries every 3-5 seconds",
-            "animation_style": "slow, educational pacing with extended pauses for understanding",
-        },
-    }
+
     depth = state.get("explanation_depth", "detailed")
-    depth_config = depth_configs.get(depth, depth_configs["detailed"])
-    
+    depth_config = DEPTH_CONFIGS.get(depth, DEPTH_CONFIGS["detailed"])
+
     prompt = f"""Create a Manim animation based on this request:
 
 **Title:** {state["scene_title"]}
@@ -236,26 +271,29 @@ transcript = {{
 # TRANSCRIPT_END
 ```
 """
-    
+
     messages = [
         {"role": "system", "content": state["system_message"]},
         {"role": "user", "content": prompt},
     ]
-    
+
     response_text = llm_chat(messages, temperature=0.2)
-    
+
     if response_text:
-        code_match = re.search(r'# CODE_START\n(.*?)# CODE_END', response_text, re.DOTALL)
-        code = code_match.group(1).strip() if code_match else response_text
-        
+        code = _extract_code_block(response_text)
+
         transcript = {}
-        transcript_match = re.search(r'# TRANSCRIPT_START\n.*?transcript\s*=\s*(\{.*?\})\s*# TRANSCRIPT_END', response_text, re.DOTALL)
+        transcript_match = re.search(
+            r'# TRANSCRIPT_START\n.*?transcript\s*=\s*(\{.*?\})\s*# TRANSCRIPT_END',
+            response_text,
+            re.DOTALL,
+        )
         if transcript_match:
             try:
                 transcript = eval(transcript_match.group(1))
-            except:
+            except (SyntaxError, ValueError, NameError):
                 pass
-        
+
         scene_match = re.search(r'class\s+(\w+)\s*\([^)]*Scene[^)]*\)', code)
         scene_class_name = scene_match.group(1) if scene_match else "GeneratedScene"
     else:
@@ -270,7 +308,7 @@ class GeneratedScene(Scene):
 '''
         transcript = {0: f"Welcome to {state['scene_title']}"}
         scene_class_name = "GeneratedScene"
-    
+
     return {
         "code": code,
         "scene_class_name": scene_class_name,
@@ -282,98 +320,47 @@ class GeneratedScene(Scene):
 
 
 # ============================================================================
-# NODE 2: Code Executor
+# NODE 2: Code Executor (delegates to ManimExecutor)
 # ============================================================================
 
 def code_executor_node(state: VideoGenState) -> dict:
     """
     Execute Manim code and capture rendered video or errors.
-    
+
+    Delegates to ManimExecutor for actual rendering.
+
     Input: code, scene_class_name
     Output: rendered_video_path OR error
     """
-    print(f"[EXECUTOR] Starting Manim render for scene: {state.get('scene_class_name')}")
-    
-    temp_dir = tempfile.mkdtemp(prefix="manim_")
-    code_path = Path(temp_dir) / "scene.py"
-    
-    with open(code_path, "w") as f:
-        f.write(state["code"])
-    
-    print(f"[EXECUTOR] Code saved to: {code_path}")
-    
-    output_dir = Path(temp_dir) / "media"
-    
+    scene_class = state.get("scene_class_name", "GeneratedScene")
     orientation = state.get("orientation", "landscape")
-    cmd = [
-        "manim", "render",
-        str(code_path),
-        state["scene_class_name"],
-        "-ql",  # Low quality for faster testing
-        "--media_dir", str(output_dir),
-    ]
-    
-    if orientation == "portrait":
-        cmd.extend(["--resolution", "1080,1920"])
-        print(f"[EXECUTOR] Portrait mode: using resolution 1080x1920")
-    
-    print(f"[EXECUTOR] Running: {' '.join(cmd)}")
-    
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,  # 2 minute timeout
-            cwd=temp_dir,
-        )
-        
-        render_logs = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
-        
-        if result.returncode != 0:
-            error_msg = result.stderr or result.stdout or "Unknown render error"
-            print(f"[EXECUTOR] Render FAILED: {error_msg[:200]}...")
-            print(f"[EXECUTOR] Returning error state for recorrection")
-            return {
-                "error": error_msg,
-                "error_count": 1,
-                "render_logs": render_logs,
-                "temp_code_path": str(code_path),
-            }
-        
-        video_files = list(output_dir.rglob("*.mp4"))
-        print(f"[EXECUTOR] Found {len(video_files)} video files")
-        
-        if not video_files:
-            print("[EXECUTOR] No video file produced!")
-            return {
-                "error": "No video file produced",
-                "error_count": 1,
-                "render_logs": render_logs,
-                "temp_code_path": str(code_path),
-            }
-        
-        print(f"[EXECUTOR] Render SUCCESS: {video_files[0]}")
+
+    print(f"[EXECUTOR] Starting Manim render for scene: {scene_class}")
+
+    settings = get_settings()
+    executor = ManimExecutor(quality="l", timeout=settings.render_timeout)
+    result = executor.execute(
+        code=state["code"],
+        scene_class_name=scene_class,
+        orientation=orientation,
+    )
+
+    if result.success:
+        print(f"[EXECUTOR] Render SUCCESS: {result.video_path}")
         return {
-            "rendered_video_path": str(video_files[0]),
+            "rendered_video_path": result.video_path,
             "error": None,
-            "error_count": 0,  # Reset on success (add 0 keeps current value but marks success)
-            "render_logs": render_logs,
-            "temp_code_path": str(code_path),
+            "render_logs": f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}",
+            "temp_code_path": result.code_path,
         }
-    
-    except subprocess.TimeoutExpired:
-        return {
-            "error": "Render timeout exceeded (120s)",
-            "error_count": 1,
-            "temp_code_path": str(code_path),
-        }
-    except Exception as e:
-        return {
-            "error": str(e),
-            "error_count": 1,
-            "temp_code_path": str(code_path),
-        }
+
+    print(f"[EXECUTOR] Render FAILED: {(result.error or '')[:200]}...")
+    return {
+        "error": result.error,
+        "error_count": 1,
+        "render_logs": f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}",
+        "temp_code_path": result.code_path,
+    }
 
 
 # ============================================================================
@@ -383,14 +370,14 @@ def code_executor_node(state: VideoGenState) -> dict:
 def recorrector_node(state: VideoGenState) -> dict:
     """
     Fix code based on error feedback using OpenRouter LLM.
-    
+
     Input: code, error, retrieved_context
     Output: corrected code
     """
     error_count = state.get("error_count", 0)
     print(f"[RECORRECTOR] Attempt {error_count + 1} to fix error")
     print(f"[RECORRECTOR] Error: {state.get('error', 'unknown')[:200]}...")
-    
+
     messages = [
         {"role": "system", "content": """You are an expert at debugging Manim code for Manim v0.18+.
 
@@ -419,21 +406,14 @@ Please fix the code and return the complete corrected version.
 Only return the Python code, nothing else.
 """}
     ]
-    
+
     fixed_code = llm_chat(messages, temperature=0.1)
-    
+
     if not fixed_code:
         fixed_code = f"# Error was: {state['error'][:100]}\n{state['code']}"
     else:
-        if "```python" in fixed_code:
-            match = re.search(r'```python\n(.*?)```', fixed_code, re.DOTALL)
-            if match:
-                fixed_code = match.group(1)
-        elif "```" in fixed_code:
-            match = re.search(r'```\n?(.*?)```', fixed_code, re.DOTALL)
-            if match:
-                fixed_code = match.group(1)
-    
+        fixed_code = _extract_code_block(fixed_code)
+
     return {
         "code": fixed_code.strip(),
         "error": None,
@@ -448,34 +428,34 @@ Only return the Python code, nothing else.
 def transcript_processor_node(state: VideoGenState) -> dict:
     """
     Process transcript into timestamped sections with TTS audio.
-    
+
     Uses Kokoro 82M local model for high-quality speech synthesis.
-    
+
     Input: transcript dict
     Output: transcript_sections list, audio_segments list
     """
     sections = []
     audio_segments = []
     transcript = state.get("transcript", {})
-    
+
     sorted_items = sorted(transcript.items(), key=lambda x: float(x[0]))
-    
+
     print(f"[TTS] Processing {len(sorted_items)} transcript segments...")
-    
+
     tts = None
     try:
         from ..tts import KokoroTTS, KOKORO_AVAILABLE
         if KOKORO_AVAILABLE:
-            tts = KokoroTTS(voice="af_bella")  # American female voice
+            tts = KokoroTTS(voice="af_bella")
             print("[TTS] Kokoro TTS initialized successfully")
         else:
             print("[TTS] WARNING: Kokoro not available (kokoro-onnx not installed)")
     except ImportError as e:
         print(f"[TTS] WARNING: Could not import TTS module: {e}")
-    
+
     for i, (timestamp, text) in enumerate(sorted_items):
         audio_path = None
-        
+
         if tts and text.strip():
             try:
                 print(f"[TTS] Generating audio for segment {i+1}/{len(sorted_items)}: {text[:50]}...")
@@ -488,16 +468,16 @@ def transcript_processor_node(state: VideoGenState) -> dict:
                     print(f"[TTS] ✗ Segment {i+1} failed: {result.error}")
             except Exception as e:
                 print(f"[TTS] ✗ Segment {i+1} exception: {e}")
-        
+
         section = TranscriptSection(
             timestamp=float(timestamp),
             text=str(text),
             audio_path=audio_path,
         )
         sections.append(section)
-    
+
     print(f"[TTS] Complete: {len(audio_segments)} audio files generated")
-    
+
     return {
         "transcript_sections": sections,
         "audio_segments": audio_segments,
@@ -508,13 +488,16 @@ def transcript_processor_node(state: VideoGenState) -> dict:
 # NODE 5: Render Checker
 # ============================================================================
 
+_DURATION_TOLERANCE = 0.20  # ±20%
+
+
 def render_checker_node(state: VideoGenState) -> dict:
     """
     Validate the rendered video and measure its actual duration.
-    
+
     Compares actual duration against target_duration (scene_length * 60).
     Flags duration mismatch if outside ±20% tolerance.
-    
+
     Input: rendered_video_path, scene_length
     Output: video_valid, validation_errors, checked_video_path, actual_duration
     """
@@ -522,69 +505,50 @@ def render_checker_node(state: VideoGenState) -> dict:
     target_duration = state.get("target_duration", state.get("scene_length", 1.0) * 60)
     errors = []
     actual_duration = None
-    
+
     print(f"[RENDER CHECK] Input video path: {video_path}")
     print(f"[RENDER CHECK] Target duration: {target_duration}s")
-    
+
     if not video_path or not Path(video_path).exists():
-        print(f"[RENDER CHECK] Video file does not exist!")
+        print("[RENDER CHECK] Video file does not exist!")
         return {
             "video_valid": False,
             "validation_errors": ["Video file does not exist"],
             "checked_video_path": None,
             "actual_duration": None,
         }
-    
+
     file_size = Path(video_path).stat().st_size
     print(f"[RENDER CHECK] Video file size: {file_size} bytes")
     if file_size < 1000:
         errors.append(f"Video file too small: {file_size} bytes")
-    
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "csv=p=0",
-                video_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            actual_duration = float(result.stdout.strip())
-            print(f"[RENDER CHECK] Actual duration: {actual_duration:.1f}s (target: {target_duration:.1f}s)")
-            
-            duration_ratio = actual_duration / target_duration if target_duration > 0 else 1.0
-            tolerance = 0.20  # ±20%
-            if abs(duration_ratio - 1.0) > tolerance:
-                deviation_pct = (duration_ratio - 1.0) * 100
-                direction = "longer" if deviation_pct > 0 else "shorter"
-                errors.append(
-                    f"Duration mismatch: video is {abs(deviation_pct):.0f}% {direction} "
-                    f"than target ({actual_duration:.1f}s vs {target_duration:.1f}s)"
-                )
-                print(f"[RENDER CHECK] Duration mismatch: {deviation_pct:+.0f}%")
-            else:
-                print(f"[RENDER CHECK] Duration within tolerance ({duration_ratio:.2f}x)")
+
+    actual_duration = get_video_duration(video_path)
+    if actual_duration is not None:
+        print(f"[RENDER CHECK] Actual duration: {actual_duration:.1f}s (target: {target_duration:.1f}s)")
+
+        duration_ratio = actual_duration / target_duration if target_duration > 0 else 1.0
+        if abs(duration_ratio - 1.0) > _DURATION_TOLERANCE:
+            deviation_pct = (duration_ratio - 1.0) * 100
+            direction = "longer" if deviation_pct > 0 else "shorter"
+            errors.append(
+                f"Duration mismatch: video is {abs(deviation_pct):.0f}% {direction} "
+                f"than target ({actual_duration:.1f}s vs {target_duration:.1f}s)"
+            )
+            print(f"[RENDER CHECK] Duration mismatch: {deviation_pct:+.0f}%")
         else:
-            print(f"[RENDER CHECK] Could not determine video duration")
-            if result.stderr:
-                errors.append(f"ffprobe error: {result.stderr}")
-    except FileNotFoundError:
-        print("[RENDER CHECK] ffprobe not available, skipping duration check")
-    except Exception as e:
-        errors.append(f"Video validation error: {e}")
-    
+            print(f"[RENDER CHECK] Duration within tolerance ({duration_ratio:.2f}x)")
+    else:
+        print("[RENDER CHECK] Could not determine video duration")
+
     duration_errors = [e for e in errors if "Duration mismatch" in e]
     non_duration_errors = [e for e in errors if "Duration mismatch" not in e]
-    
+
     video_valid = len(non_duration_errors) == 0
     checked_path = video_path if video_valid else None
-    
+
     print(f"[RENDER CHECK] Validation {'passed' if checked_path else 'failed'}: {errors}")
-    
+
     return {
         "video_valid": video_valid,
         "validation_errors": errors,
@@ -597,69 +561,61 @@ def render_checker_node(state: VideoGenState) -> dict:
 # NODE 5b: Video Duration Fixer
 # ============================================================================
 
+_MAX_PTS_FACTOR = 2.0  # Cap at 2x slowdown or 2x speedup
+
+
 def video_duration_fixer_node(state: VideoGenState) -> dict:
     """
     Adjust video playback speed to match target duration using ffmpeg.
-    
+
     Uses PTS (Presentation Time Stamp) manipulation to speed up or slow
     down the video. Caps adjustment at 2x to avoid extreme distortion.
-    
+
+    Stores the *actual* speed ratio (adjusted_duration / original_duration)
+    so the synchronizer can accurately rescale transcript timestamps,
+    even when PTS is clamped.
+
     Input: checked_video_path, actual_duration, target_duration
     Output: checked_video_path (adjusted), duration_adjusted, duration_factor
     """
     video_path = state.get("checked_video_path")
-    actual_duration = state.get("actual_duration")
+    original_duration = state.get("actual_duration")
     target_duration = state.get("target_duration", state.get("scene_length", 1.0) * 60)
-    
+
     print(f"[DURATION FIX] Video: {video_path}")
-    print(f"[DURATION FIX] Actual: {actual_duration}s -> Target: {target_duration}s")
-    
-    if not video_path or not actual_duration or actual_duration <= 0:
+    print(f"[DURATION FIX] Original: {original_duration}s -> Target: {target_duration}s")
+
+    if not video_path or not original_duration or original_duration <= 0:
         print("[DURATION FIX] Cannot fix — missing video or duration info")
-        return {
-            "duration_adjusted": False,
-            "duration_factor": None,
-        }
-    
+        return {"duration_adjusted": False, "duration_factor": None}
+
     if target_duration <= 0:
         print("[DURATION FIX] Invalid target duration, skipping")
-        return {
-            "duration_adjusted": False,
-            "duration_factor": None,
-        }
-    
-    factor = actual_duration / target_duration
-    tolerance = 0.20
-    
-    if abs(factor - 1.0) <= tolerance:
-        print(f"[DURATION FIX] Duration within tolerance ({factor:.2f}x), no adjustment needed")
-        return {
-            "duration_adjusted": False,
-            "duration_factor": None,
-        }
-    
-    # setpts multiplier: >1 slows down (stretches), <1 speeds up (compresses)
-    # If video is too long (factor > 1), we need pts < 1 to speed up
-    # If video is too short (factor < 1), we need pts > 1 to slow down
-    pts_factor = target_duration / actual_duration  # inverse of factor
-    
-    max_pts = 2.0  # Cap at 2x slowdown or 2x speedup
-    min_pts = 1.0 / max_pts
-    clamped_pts = max(min_pts, min(max_pts, pts_factor))
-    
+        return {"duration_adjusted": False, "duration_factor": None}
+
+    ratio = original_duration / target_duration
+
+    if abs(ratio - 1.0) <= _DURATION_TOLERANCE:
+        print(f"[DURATION FIX] Duration within tolerance ({ratio:.2f}x), no adjustment needed")
+        return {"duration_adjusted": False, "duration_factor": None}
+
+    # setpts multiplier: >1 slows down, <1 speeds up
+    pts_factor = target_duration / original_duration  # inverse of ratio
+    min_pts = 1.0 / _MAX_PTS_FACTOR
+    clamped_pts = max(min_pts, min(_MAX_PTS_FACTOR, pts_factor))
+
     if clamped_pts != pts_factor:
-        print(f"[DURATION FIX] PTS factor clamped from {pts_factor:.4f} to {clamped_pts:.4f} (range {min_pts}-{max_pts})")
+        print(f"[DURATION FIX] PTS factor clamped from {pts_factor:.4f} to {clamped_pts:.4f}")
         pts_factor = clamped_pts
-    
-    if factor > 1.0:
-        print(f"[DURATION FIX] Video is too long ({actual_duration:.1f}s > {target_duration:.1f}s) — speeding up (setpts={pts_factor:.4f}*PTS)")
-    else:
-        print(f"[DURATION FIX] Video is too short ({actual_duration:.1f}s < {target_duration:.1f}s) — slowing down (setpts={pts_factor:.4f}*PTS)")
-    
+
+    direction = "too long" if ratio > 1.0 else "too short"
+    action = "speeding up" if ratio > 1.0 else "slowing down"
+    print(f"[DURATION FIX] Video is {direction} ({original_duration:.1f}s vs {target_duration:.1f}s) — {action} (setpts={pts_factor:.4f}*PTS)")
+
     try:
         temp_dir = tempfile.mkdtemp(prefix="manim_durfix_")
         adjusted_path = Path(temp_dir) / "duration_adjusted.mp4"
-        
+
         cmd = [
             "ffmpeg", "-y",
             "-i", video_path,
@@ -667,54 +623,37 @@ def video_duration_fixer_node(state: VideoGenState) -> dict:
             "-an",  # Strip audio since we merge later
             str(adjusted_path),
         ]
-        
+
         print(f"[DURATION FIX] Running: {' '.join(cmd)}")
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
         if result.returncode != 0:
             print(f"[DURATION FIX] ffmpeg failed: {result.stderr[:300]}")
-            return {
-                "duration_adjusted": False,
-                "duration_factor": None,
-            }
-        
+            return {"duration_adjusted": False, "duration_factor": None}
+
         if not adjusted_path.exists():
             print("[DURATION FIX] Output file not created")
-            return {
-                "duration_adjusted": False,
-                "duration_factor": None,
-            }
-        
-        verify_result = subprocess.run(
-            [
-                "ffprobe", "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "csv=p=0",
-                str(adjusted_path),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        
-        new_duration = None
-        if verify_result.returncode == 0 and verify_result.stdout.strip():
-            new_duration = float(verify_result.stdout.strip())
-            print(f"[DURATION FIX] Adjusted duration: {new_duration:.1f}s (target: {target_duration:.1f}s)")
-        
+            return {"duration_adjusted": False, "duration_factor": None}
+
+        new_duration = get_video_duration(str(adjusted_path))
+        if new_duration is None:
+            # Estimate from PTS if ffprobe fails
+            new_duration = original_duration * pts_factor
+
+        # Actual speed ratio: how much the video was stretched/compressed
+        # >1 means video got longer, <1 means video got shorter
+        actual_speed_ratio = new_duration / original_duration
+
+        print(f"[DURATION FIX] Adjusted duration: {new_duration:.1f}s (original: {original_duration:.1f}s, speed_ratio: {actual_speed_ratio:.4f})")
         print(f"[DURATION FIX] Success! Adjusted video: {adjusted_path}")
+
         return {
             "checked_video_path": str(adjusted_path),
             "duration_adjusted": True,
-            "duration_factor": factor,
-            "actual_duration": new_duration or target_duration,
+            "duration_factor": actual_speed_ratio,
+            "actual_duration": new_duration,
         }
-    
+
     except subprocess.TimeoutExpired:
         print("[DURATION FIX] ffmpeg timeout")
         return {"duration_adjusted": False, "duration_factor": None}
@@ -730,10 +669,14 @@ def video_duration_fixer_node(state: VideoGenState) -> dict:
 def synchronizer_node(state: VideoGenState) -> dict:
     """
     Synchronize video with transcript timestamps.
-    
+
     If the video duration was adjusted, scales all transcript timestamps
     proportionally so audio cues stay aligned with the visual content.
-    
+
+    ``duration_factor`` is the actual speed ratio (adjusted_dur / original_dur)
+    returned by ``video_duration_fixer_node``.  A value of 2.0 means the video
+    is now twice as long, so every timestamp must be multiplied by 2.0.
+
     Input: checked_video_path, transcript_sections, audio_segments, duration_factor
     Output: synced_video_path, transcript_sections (adjusted), audio_segments
     """
@@ -741,27 +684,30 @@ def synchronizer_node(state: VideoGenState) -> dict:
     audio_segments = state.get("audio_segments", [])
     transcript_sections = state.get("transcript_sections", [])
     duration_adjusted = state.get("duration_adjusted", False)
-    duration_factor = state.get("duration_factor")
-    
+    speed_ratio = state.get("duration_factor")  # adjusted_dur / original_dur
+
     print(f"[SYNC] Video path: {video_path}")
     print(f"[SYNC] Audio segments: {len(audio_segments)}")
     print(f"[SYNC] Transcript sections: {len(transcript_sections)}")
-    print(f"[SYNC] Duration adjusted: {duration_adjusted} (factor: {duration_factor})")
-    
+    print(f"[SYNC] Duration adjusted: {duration_adjusted} (speed_ratio: {speed_ratio})")
+
     synced_sections = list(transcript_sections)
-    
-    if duration_adjusted and duration_factor and duration_factor != 1.0:
-        print(f"[SYNC] Scaling transcript timestamps by factor {duration_factor:.4f}")
-        synced_sections = []
-        for section in transcript_sections:
-            adjusted_section = TranscriptSection(
-                timestamp=section["timestamp"] / duration_factor,
+
+    if duration_adjusted and speed_ratio and speed_ratio != 1.0:
+        # Multiply timestamps by speed_ratio:
+        #   video slowed 2x → speed_ratio=2.0 → timestamps double
+        #   video sped up 2x → speed_ratio=0.5 → timestamps halve
+        print(f"[SYNC] Scaling transcript timestamps × {speed_ratio:.4f}")
+        synced_sections = [
+            TranscriptSection(
+                timestamp=section["timestamp"] * speed_ratio,
                 text=section["text"],
                 audio_path=section.get("audio_path"),
             )
-            synced_sections.append(adjusted_section)
+            for section in transcript_sections
+        ]
         print(f"[SYNC] Adjusted {len(synced_sections)} transcript timestamps")
-    
+
     return {
         "synced_video_path": video_path,
         "audio_segments": audio_segments,
@@ -776,78 +722,60 @@ def synchronizer_node(state: VideoGenState) -> dict:
 def audio_video_merger_node(state: VideoGenState) -> dict:
     """
     Merge audio segments with video using ffmpeg.
-    
+
     Places each audio segment at its transcript timestamp position,
     creating a properly timed narration track that aligns with the video.
-    Handles audio/video length mismatches by padding audio with silence.
-    
+
     Input: synced_video_path, audio_segments, transcript_sections
     Output: final_output_path
     """
     video_path = state.get("synced_video_path")
     audio_segments = state.get("audio_segments", [])
     transcript_sections = state.get("transcript_sections", [])
-    
+
     print(f"[AUDIO MERGE] Video path: {video_path}")
     print(f"[AUDIO MERGE] Audio segments: {len(audio_segments)}")
     print(f"[AUDIO MERGE] Transcript sections: {len(transcript_sections)}")
-    
+
     if not video_path:
         print("[AUDIO MERGE] No video path provided")
         return {"final_output_path": None}
-    
+
     valid_audio_segments = [p for p in audio_segments if p and Path(p).exists()]
     print(f"[AUDIO MERGE] Valid audio files: {len(valid_audio_segments)}")
-    
+
     if not valid_audio_segments:
         print("[AUDIO MERGE] No valid audio segments, returning video only")
         return {"final_output_path": video_path}
-    
+
     try:
         temp_dir = tempfile.mkdtemp(prefix="manim_merge_")
-        
-        # Get video duration for padding calculations
-        video_duration = None
-        try:
-            dur_result = subprocess.run(
-                [
-                    "ffprobe", "-v", "error",
-                    "-show_entries", "format=duration",
-                    "-of", "csv=p=0",
-                    video_path,
-                ],
-                capture_output=True, text=True, timeout=30,
-            )
-            if dur_result.returncode == 0 and dur_result.stdout.strip():
-                video_duration = float(dur_result.stdout.strip())
-                print(f"[AUDIO MERGE] Video duration: {video_duration:.1f}s")
-        except Exception as e:
-            print(f"[AUDIO MERGE] Could not get video duration: {e}")
-        
+
+        video_duration = get_video_duration(video_path)
+        if video_duration is not None:
+            print(f"[AUDIO MERGE] Video duration: {video_duration:.1f}s")
+
         # Build timestamp-aligned audio using transcript sections
-        # Match audio segments to transcript sections that have audio_path
-        sections_with_audio = []
-        for section in transcript_sections:
-            audio_path = section.get("audio_path")
-            if audio_path and Path(audio_path).exists():
-                sections_with_audio.append(section)
-        
+        sections_with_audio = [
+            section for section in transcript_sections
+            if section.get("audio_path") and Path(section["audio_path"]).exists()
+        ]
+
         print(f"[AUDIO MERGE] Sections with valid audio: {len(sections_with_audio)}")
-        
+
         if not sections_with_audio:
             # Fallback: no timestamp info, use valid_audio_segments directly
             sections_with_audio = [
                 {"timestamp": 0.0, "audio_path": p}
                 for p in valid_audio_segments
             ]
-        
+
         merged_audio = Path(temp_dir) / "merged_audio.wav"
-        
+
         if len(sections_with_audio) == 1:
-            # Single segment: just use adelay for its timestamp
             section = sections_with_audio[0]
             delay_ms = int(section["timestamp"] * 1000)
-            
+
             cmd = [
                 "ffmpeg", "-y",
                 "-i", section["audio_path"],
@@ -858,15 +786,9 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             if result.returncode != 0:
                 print(f"[AUDIO MERGE] Single adelay failed: {result.stderr[:200]}")
-                # Fallback: just copy
-                import shutil
                 shutil.copy2(section["audio_path"], str(merged_audio))
         else:
-            # Multiple segments: use adelay to place each at its absolute
-            # timestamp, then amix to combine them into one track.
-            # This avoids cumulative drift from concat-based silence padding.
-            
-            # First, normalize all audio segments to the same format
+            # Multiple segments: use adelay + amix for absolute timestamp positioning
             norm_paths = []
             for i, section in enumerate(sections_with_audio):
                 norm_path = Path(temp_dir) / f"norm_{i:03d}.wav"
@@ -876,35 +798,31 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
                     "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le",
                     str(norm_path),
                 ]
-                result = subprocess.run(
-                    norm_cmd, capture_output=True, text=True, timeout=30,
-                )
+                result = subprocess.run(norm_cmd, capture_output=True, text=True, timeout=30)
                 if result.returncode == 0 and norm_path.exists():
                     norm_paths.append((section["timestamp"], str(norm_path)))
                     print(f"[AUDIO MERGE]   Segment {i}: positioned at {section['timestamp']:.1f}s")
                 else:
                     print(f"[AUDIO MERGE]   Segment {i}: normalization failed, skipping")
-            
+
             if not norm_paths:
                 print("[AUDIO MERGE] No normalized segments produced")
                 return {"final_output_path": video_path}
-            
+
             # Build ffmpeg command with adelay filters for absolute positioning
             inputs = []
             filter_parts = []
             for i, (timestamp, path) in enumerate(norm_paths):
                 inputs.extend(["-i", path])
                 delay_ms = int(timestamp * 1000)
-                # adelay places this segment at the exact timestamp
                 filter_parts.append(f"[{i}:a]adelay={delay_ms}|{delay_ms}[a{i}]")
-            
-            # Mix all delayed segments together
+
             mix_inputs = "".join(f"[a{i}]" for i in range(len(norm_paths)))
             filter_parts.append(
                 f"{mix_inputs}amix=inputs={len(norm_paths)}:duration=longest:normalize=0[out]"
             )
             filter_graph = ";".join(filter_parts)
-            
+
             mix_cmd = [
                 "ffmpeg", "-y",
                 *inputs,
@@ -913,37 +831,22 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
                 "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le",
                 str(merged_audio),
             ]
-            
+
             print(f"[AUDIO MERGE] Mixing {len(norm_paths)} segments with adelay positioning...")
-            result = subprocess.run(
-                mix_cmd, capture_output=True, text=True, timeout=60,
-            )
-            
+            result = subprocess.run(mix_cmd, capture_output=True, text=True, timeout=60)
+
             if result.returncode != 0 or not merged_audio.exists():
                 print(f"[AUDIO MERGE] Adelay mix failed: {result.stderr[:200]}")
                 return {"final_output_path": video_path}
-        
+
         # Log merged audio duration
-        try:
-            ma_result = subprocess.run(
-                [
-                    "ffprobe", "-v", "error",
-                    "-show_entries", "format=duration",
-                    "-of", "csv=p=0",
-                    str(merged_audio),
-                ],
-                capture_output=True, text=True, timeout=10,
-            )
-            if ma_result.returncode == 0 and ma_result.stdout.strip():
-                audio_dur = float(ma_result.stdout.strip())
-                print(f"[AUDIO MERGE] Merged audio duration: {audio_dur:.1f}s")
-        except Exception:
-            pass
-        
+        audio_dur = get_video_duration(str(merged_audio), timeout=10)
+        if audio_dur is not None:
+            print(f"[AUDIO MERGE] Merged audio duration: {audio_dur:.1f}s")
+
         print(f"[AUDIO MERGE] Timestamp-aligned audio created: {merged_audio}")
-        
-        # Merge audio with video
-        # apad pads audio with silence if shorter than video
+
+        # Merge audio with video (apad pads audio with silence if shorter)
         final_output = Path(temp_dir) / "final_with_audio.mp4"
         merge_cmd = [
             "ffmpeg", "-y",
@@ -958,15 +861,10 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
             "-shortest",
             str(final_output),
         ]
-        
-        print(f"[AUDIO MERGE] Merging timestamp-aligned audio with video...")
-        result = subprocess.run(
-            merge_cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        
+
+        print("[AUDIO MERGE] Merging timestamp-aligned audio with video...")
+        result = subprocess.run(merge_cmd, capture_output=True, text=True, timeout=120)
+
         if result.returncode != 0:
             print(f"[AUDIO MERGE] Merge command failed: {result.stderr[:200]}")
             print("[AUDIO MERGE] Trying simple merge fallback...")
@@ -980,28 +878,22 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
                 "-map", "1:a:0",
                 str(final_output),
             ]
-            result = subprocess.run(
-                simple_merge_cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-        
+            subprocess.run(simple_merge_cmd, capture_output=True, text=True, timeout=120)
+
         if not final_output.exists():
-            print(f"[AUDIO MERGE] Final output not created")
+            print("[AUDIO MERGE] Final output not created")
             return {"final_output_path": video_path}
-        
+
         # Copy to the project output directory for easy access
         project_output = Path("output")
         project_output.mkdir(parents=True, exist_ok=True)
         output_copy = project_output / "output.mp4"
-        import shutil
         shutil.copy2(str(final_output), str(output_copy))
         print(f"[AUDIO MERGE] Copied to: {output_copy.resolve()}")
-        
+
         print(f"[AUDIO MERGE] Success! Final output: {final_output}")
         return {"final_output_path": str(final_output)}
-    
+
     except Exception as e:
         print(f"[AUDIO MERGE] Error: {e}")
         return {"final_output_path": video_path}
@@ -1016,11 +908,11 @@ def should_retry_or_continue(state: VideoGenState) -> Literal["recorrector", "re
     error = state.get("error")
     error_count = state.get("error_count", 0)
     max_retries = state.get("max_retries", 3)
-    
+
     if error and error_count < max_retries:
         print(f"[RETRY] Error detected, attempt {error_count + 1}/{max_retries} - sending to recorrector")
         return "recorrector"
-    
+
     if error:
         print(f"[RETRY] Max retries ({max_retries}) reached, proceeding to render_checker")
     else:
@@ -1032,27 +924,16 @@ def should_fix_duration(state: VideoGenState) -> Literal["video_duration_fixer",
     """Decide whether video duration needs fixing before sync."""
     actual_duration = state.get("actual_duration")
     target_duration = state.get("target_duration", state.get("scene_length", 1.0) * 60)
-    
+
     if not actual_duration or not target_duration or target_duration <= 0:
         print("[DURATION CHECK] Missing duration info, skipping fix")
         return "synchronizer"
-    
+
     factor = actual_duration / target_duration
-    tolerance = 0.20
-    
-    if abs(factor - 1.0) > tolerance:
+
+    if abs(factor - 1.0) > _DURATION_TOLERANCE:
         print(f"[DURATION CHECK] Duration off by {(factor - 1.0) * 100:+.0f}% — routing to fixer")
         return "video_duration_fixer"
-    
+
     print(f"[DURATION CHECK] Duration OK ({factor:.2f}x) — skipping fix")
     return "synchronizer"
-
-
-def should_rerender(state: VideoGenState) -> Literal["code_executor", "synchronizer"]:
-    """Decide whether to re-render or proceed to sync."""
-    if state.get("video_valid"):
-        return "synchronizer"
-    # If validation failed but we have error count space, try re-rendering
-    if state.get("error_count", 0) < state.get("max_retries", 3):
-        return "code_executor"
-    return "synchronizer"  # Give up and proceed anyway
