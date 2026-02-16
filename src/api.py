@@ -10,15 +10,26 @@ from typing import Optional, Literal
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from .config import get_settings
+
+STATIC_DIR = Path(__file__).parent / "static"
 
 app = FastAPI(
     title="Manim Graph RAG Agent",
     description="Generate mathematical animations using AI",
     version="1.0.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -92,10 +103,13 @@ jobs: dict[str, JobStatus] = {}
 # Endpoints
 # ---------------------------------------------------------------------------
 
-@app.get("/")
+@app.get("/", response_class=HTMLResponse)
 async def root():
-    """Health check endpoint."""
-    return {"status": "ok", "service": "Manim Graph RAG Agent"}
+    """Serve the frontend SPA."""
+    index_file = STATIC_DIR / "index.html"
+    if index_file.is_file():
+        return HTMLResponse(content=index_file.read_text(), status_code=200)
+    return HTMLResponse(content="<h1>Manim Graph RAG Agent</h1><p>Frontend not found.</p>", status_code=200)
 
 
 @app.get("/health")
@@ -241,3 +255,10 @@ async def _run_generation_job(
             status="failed",
             error=str(e),
         )
+
+
+# ---------------------------------------------------------------------------
+# Static file serving (must be after all API routes)
+# ---------------------------------------------------------------------------
+
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
