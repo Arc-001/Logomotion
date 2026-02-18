@@ -50,6 +50,13 @@
             <option value="portrait">Portrait</option>
           </select>
         </div>
+        <div class="form-group">
+          <label for="gen-duration-mode">Duration Mode</label>
+          <select id="gen-duration-mode" v-model="form.duration_mode">
+            <option value="guide">Guide (natural)</option>
+            <option value="strict">Strict (exact)</option>
+          </select>
+        </div>
       </div>
       <div v-if="error" class="form-error">{{ error }}</div>
       <div class="form-actions">
@@ -74,6 +81,7 @@ const form = reactive({
   length: 1.0,
   depth: 'detailed',
   orientation: 'landscape',
+  duration_mode: 'guide',
 })
 const submitting = ref(false)
 const error = ref('')
@@ -91,6 +99,7 @@ async function submit() {
         length: form.length,
         depth: form.depth,
         orientation: form.orientation,
+        duration_mode: form.duration_mode,
       }),
     })
     emit('submitted', data)
@@ -152,7 +161,7 @@ async function submit() {
 
 .form-row {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr 1fr;
   gap: 16px;
 }
 

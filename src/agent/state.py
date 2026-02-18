@@ -55,6 +55,7 @@ class VideoGenState(TypedDict):
     scene_length: float
     explanation_depth: str  # "basic", "detailed", or "comprehensive"
     orientation: str  # "landscape" or "portrait"
+    duration_mode: str  # "guide" = soft hint, "strict" = ffmpeg speed adjust
     
     retrieved_examples: list[str]  # Code examples from Graph RAG
     retrieved_context: str  # Formatted context for LLM
@@ -97,6 +98,7 @@ def create_initial_state(
     scene_length: float = 1.0,
     explanation_depth: str = "detailed",
     orientation: str = "landscape",
+    duration_mode: str = "guide",
     system_message: Optional[str] = None,
     max_retries: Optional[int] = None,
 ) -> VideoGenState:
@@ -149,6 +151,7 @@ def create_initial_state(
         scene_length=scene_length,
         explanation_depth=explanation_depth,
         orientation=orientation,
+        duration_mode=duration_mode,
         
         retrieved_examples=[],
         retrieved_context="",

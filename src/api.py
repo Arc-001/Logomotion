@@ -62,6 +62,10 @@ class GenerateRequest(BaseModel):
         default=None,
         description="Video orientation: landscape (16:9) or portrait (9:16)",
     )
+    duration_mode: Literal["strict", "guide"] = Field(
+        default=None,
+        description="Duration enforcement: 'guide' = soft hint (default), 'strict' = ffmpeg speed adjust",
+    )
 
     @model_validator(mode="after")
     def apply_defaults_and_validate(self):
@@ -76,6 +80,8 @@ class GenerateRequest(BaseModel):
             self.depth = settings.explanation_depth
         if self.orientation is None:
             self.orientation = settings.video_orientation
+        if self.duration_mode is None:
+            self.duration_mode = settings.duration_mode
         return self
 
 
@@ -142,6 +148,7 @@ async def generate_video(request: GenerateRequest, background_tasks: BackgroundT
         request.length,
         request.depth,
         request.orientation,
+        request.duration_mode,
     )
 
     return GenerateResponse(
@@ -219,6 +226,7 @@ async def _run_generation_job(
     length: float,
     depth: str,
     orientation: str,
+    duration_mode: str,
 ):
     """Background task to run video generation."""
     from .agent.graph import generate_video
@@ -232,6 +240,7 @@ async def _run_generation_job(
             scene_length=length,
             explanation_depth=depth,
             orientation=orientation,
+            duration_mode=duration_mode,
         )
 
         video_path = result.get("final_output_path") or result.get("rendered_video_path")

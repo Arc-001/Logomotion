@@ -183,6 +183,18 @@ Used animations: {', '.join(result.used_animations)}
     depth = state.get("explanation_depth", "detailed")
     depth_config = DEPTH_CONFIGS.get(depth, DEPTH_CONFIGS["detailed"])
 
+    duration_mode = state.get("duration_mode", "guide")
+    if duration_mode == "guide":
+        duration_instruction = f"""- Target: approximately {target_seconds} seconds (this is a SOFT GUIDE, not exact)
+- The video does NOT need to be exactly this length — aim for roughly this range
+- Use self.wait(1) to self.wait(3) between sections for natural pacing
+- Use run_time=2 for major animations"""
+    else:
+        duration_instruction = f"""- Target: EXACTLY {target_seconds} seconds (STRICT requirement)
+- Calculate total animation + wait time to match this precisely
+- Use self.wait(1) to self.wait(3) between sections
+- Use run_time=2 for major animations"""
+
     prompt = f"""Create a Manim animation based on this request:
 
 **Title:** {state["scene_title"]}
@@ -220,9 +232,7 @@ label = Text("Label").scale(0.4).next_to(content, RIGHT, buff=0.5)
 ```
 
 ### 4. DURATION
-- Target: approximately {target_seconds} seconds
-- Use self.wait(1) to self.wait(3) between sections
-- Use run_time=2 for major animations
+{duration_instruction}
 - Animation style: {depth_config["animation_style"]}
 
 ### 5. MANIM API (v0.18+ ONLY - CRITICAL)
@@ -237,9 +247,14 @@ Use ONLY these correct APIs. DO NOT use deprecated syntax:
 - VGroup: `VGroup(obj1, obj2).arrange(DOWN, buff=0.3)`
 - Avoid: `ShowCreation` (use `Create`), `FadeInFromDown` (use `FadeIn` with shift)
 
-### 6. TRANSCRIPT FOR AUDIO
+### 6. TRANSCRIPT / NARRATION (CRITICAL — NO SILENCE)
+- **The narration MUST cover the ENTIRE video duration with NO silent gaps longer than 3 seconds.**
 - Detail level: {depth_config["detail_level"]}
-- Add transcript {depth_config["transcript_density"]}
+- Add transcript entries {depth_config["transcript_density"]} — this is the MINIMUM density
+- Every visual change, animation, or concept must have accompanying narration
+- Start narration at timestamp 0 and continue until the very end of the video
+- If a section has a self.wait(), there MUST be narration during or right before it
+- Think of this as a voiceover for a YouTube educational video — continuous speaking
 
 Here are some reference examples:
 
@@ -263,10 +278,13 @@ class YourSceneName(Scene):
 # TRANSCRIPT_START
 transcript = {{
     0: "Introduction text spoken at the start...",
-    5: "Explanation of the first concept...",
-    15: "Moving on to the next topic...",
-    30: "Further explanation...",
-    # Add entries {depth_config["transcript_density"]} covering the full {target_seconds} seconds
+    3: "Continuing the explanation without gaps...",
+    8: "Every few seconds, add more narration...",
+    12: "Keep talking through the entire video...",
+    18: "No long silences — every section needs voice...",
+    25: "Wrap up with a concluding sentence...",
+    # MUST have entries {depth_config["transcript_density"]} covering the FULL {target_seconds} seconds
+    # NO gaps longer than 3 seconds between entries
 }}
 # TRANSCRIPT_END
 ```
@@ -723,8 +741,9 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
     """
     Merge audio segments with video using ffmpeg.
 
-    Places each audio segment at its transcript timestamp position,
-    creating a properly timed narration track that aligns with the video.
+    Builds a single narration track by concatenating silence gaps and
+    (optionally sped-up) audio segments so each one lands at its transcript
+    timestamp with zero overlap.
 
     Input: synced_video_path, audio_segments, transcript_sections
     Output: final_output_path
@@ -755,88 +774,150 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
         if video_duration is not None:
             print(f"[AUDIO MERGE] Video duration: {video_duration:.1f}s")
 
-        # Build timestamp-aligned audio using transcript sections
+        # Collect sections that have valid audio files
         sections_with_audio = [
             section for section in transcript_sections
             if section.get("audio_path") and Path(section["audio_path"]).exists()
         ]
-
         print(f"[AUDIO MERGE] Sections with valid audio: {len(sections_with_audio)}")
 
         if not sections_with_audio:
-            # Fallback: no timestamp info, use valid_audio_segments directly
             sections_with_audio = [
                 {"timestamp": 0.0, "audio_path": p}
                 for p in valid_audio_segments
             ]
 
-        merged_audio = Path(temp_dir) / "merged_audio.wav"
+        # Drop segments that start past video end
+        if video_duration is not None:
+            before = len(sections_with_audio)
+            sections_with_audio = [
+                s for s in sections_with_audio
+                if s["timestamp"] < video_duration
+            ]
+            dropped = before - len(sections_with_audio)
+            if dropped > 0:
+                print(f"[AUDIO MERGE] Dropped {dropped} segment(s) past video end ({video_duration:.1f}s)")
 
-        if len(sections_with_audio) == 1:
-            section = sections_with_audio[0]
-            delay_ms = int(section["timestamp"] * 1000)
+        if not sections_with_audio:
+            print("[AUDIO MERGE] No audio segments within video bounds")
+            return {"final_output_path": video_path}
 
-            cmd = [
+        # Sort by timestamp
+        sections_with_audio.sort(key=lambda s: s["timestamp"])
+
+        # --- Build the audio track by concatenating silence + segments ---
+        # For each segment:
+        #   1. Calculate available window (until next segment or video end)
+        #   2. Normalize to consistent format (24kHz mono s16le)
+        #   3. If audio is longer than window, speed it up with atempo
+        #   4. Generate silence to fill the gap before this segment
+        #   5. Collect all pieces for final concat
+
+        SAMPLE_RATE = 24000
+        concat_pieces = []  # list of wav file paths in order
+        cursor = 0.0  # current position in the timeline
+
+        for i, section in enumerate(sections_with_audio):
+            ts = section["timestamp"]
+
+            # Calculate available window for this segment
+            if i + 1 < len(sections_with_audio):
+                window = sections_with_audio[i + 1]["timestamp"] - ts
+            elif video_duration is not None:
+                window = video_duration - ts
+            else:
+                window = 999.0  # no limit for last segment if no video duration
+
+            window = max(window, 0.1)  # safety floor
+
+            # 1. Normalize audio to consistent format
+            norm_path = Path(temp_dir) / f"norm_{i:03d}.wav"
+            norm_cmd = [
                 "ffmpeg", "-y",
                 "-i", section["audio_path"],
-                "-af", f"adelay={delay_ms}|{delay_ms}",
-                str(merged_audio),
+                "-ar", str(SAMPLE_RATE), "-ac", "1", "-c:a", "pcm_s16le",
+                str(norm_path),
             ]
-            print(f"[AUDIO MERGE] Single segment at {section['timestamp']:.1f}s")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            if result.returncode != 0:
-                print(f"[AUDIO MERGE] Single adelay failed: {result.stderr[:200]}")
-                shutil.copy2(section["audio_path"], str(merged_audio))
-        else:
-            # Multiple segments: use adelay + amix for absolute timestamp positioning
-            norm_paths = []
-            for i, section in enumerate(sections_with_audio):
-                norm_path = Path(temp_dir) / f"norm_{i:03d}.wav"
-                norm_cmd = [
+            result = subprocess.run(norm_cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0 or not norm_path.exists():
+                print(f"[AUDIO MERGE]   Segment {i} ({ts:.1f}s): normalize failed, skipping")
+                continue
+
+            # 2. Get actual duration of this audio clip
+            clip_dur = get_video_duration(str(norm_path), timeout=10)
+            if clip_dur is None or clip_dur <= 0:
+                print(f"[AUDIO MERGE]   Segment {i} ({ts:.1f}s): could not measure duration, skipping")
+                continue
+
+            # 3. If audio overflows the window, speed it up
+            processed_path = norm_path
+            if clip_dur > window + 0.1:
+                speed_factor = clip_dur / window
+                # atempo only supports 0.5 to 100.0; chain for extreme values
+                processed_path = Path(temp_dir) / f"fast_{i:03d}.wav"
+                atempo_filters = _build_atempo_chain(speed_factor)
+                speed_cmd = [
                     "ffmpeg", "-y",
-                    "-i", section["audio_path"],
-                    "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le",
-                    str(norm_path),
+                    "-i", str(norm_path),
+                    "-af", atempo_filters,
+                    "-ar", str(SAMPLE_RATE), "-ac", "1", "-c:a", "pcm_s16le",
+                    str(processed_path),
                 ]
-                result = subprocess.run(norm_cmd, capture_output=True, text=True, timeout=30)
-                if result.returncode == 0 and norm_path.exists():
-                    norm_paths.append((section["timestamp"], str(norm_path)))
-                    print(f"[AUDIO MERGE]   Segment {i}: positioned at {section['timestamp']:.1f}s")
+                result = subprocess.run(speed_cmd, capture_output=True, text=True, timeout=30)
+                if result.returncode != 0 or not processed_path.exists():
+                    print(f"[AUDIO MERGE]   Segment {i} ({ts:.1f}s): speed-up failed, using original (may overlap)")
+                    processed_path = norm_path
                 else:
-                    print(f"[AUDIO MERGE]   Segment {i}: normalization failed, skipping")
+                    new_dur = get_video_duration(str(processed_path), timeout=10)
+                    print(f"[AUDIO MERGE]   Segment {i} ({ts:.1f}s): sped up {speed_factor:.2f}x ({clip_dur:.1f}s → {new_dur:.1f}s to fit {window:.1f}s window)")
+                    clip_dur = new_dur or (clip_dur / speed_factor)
+            else:
+                print(f"[AUDIO MERGE]   Segment {i} ({ts:.1f}s): {clip_dur:.1f}s audio fits in {window:.1f}s window")
 
-            if not norm_paths:
-                print("[AUDIO MERGE] No normalized segments produced")
-                return {"final_output_path": video_path}
+            # 4. If there's a gap before this segment, insert silence
+            gap = ts - cursor
+            if gap > 0.01:
+                silence_path = Path(temp_dir) / f"silence_{i:03d}.wav"
+                silence_cmd = [
+                    "ffmpeg", "-y",
+                    "-f", "lavfi", "-i", f"anullsrc=r={SAMPLE_RATE}:cl=mono",
+                    "-t", f"{gap:.4f}",
+                    "-c:a", "pcm_s16le",
+                    str(silence_path),
+                ]
+                result = subprocess.run(silence_cmd, capture_output=True, text=True, timeout=10)
+                if result.returncode == 0 and silence_path.exists():
+                    concat_pieces.append(str(silence_path))
 
-            # Build ffmpeg command with adelay filters for absolute positioning
-            inputs = []
-            filter_parts = []
-            for i, (timestamp, path) in enumerate(norm_paths):
-                inputs.extend(["-i", path])
-                delay_ms = int(timestamp * 1000)
-                filter_parts.append(f"[{i}:a]adelay={delay_ms}|{delay_ms}[a{i}]")
+            concat_pieces.append(str(processed_path))
+            cursor = ts + clip_dur
 
-            mix_inputs = "".join(f"[a{i}]" for i in range(len(norm_paths)))
-            filter_parts.append(
-                f"{mix_inputs}amix=inputs={len(norm_paths)}:duration=longest:normalize=0[out]"
-            )
-            filter_graph = ";".join(filter_parts)
+        if not concat_pieces:
+            print("[AUDIO MERGE] No audio pieces produced")
+            return {"final_output_path": video_path}
 
-            mix_cmd = [
+        # 5. Concatenate all pieces into one audio file
+        merged_audio = Path(temp_dir) / "merged_audio.wav"
+
+        if len(concat_pieces) == 1:
+            shutil.copy2(concat_pieces[0], str(merged_audio))
+        else:
+            concat_list = Path(temp_dir) / "concat.txt"
+            with open(concat_list, "w") as f:
+                for piece in concat_pieces:
+                    f.write(f"file '{piece}'\n")
+
+            concat_cmd = [
                 "ffmpeg", "-y",
-                *inputs,
-                "-filter_complex", filter_graph,
-                "-map", "[out]",
-                "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le",
+                "-f", "concat", "-safe", "0",
+                "-i", str(concat_list),
+                "-ar", str(SAMPLE_RATE), "-ac", "1", "-c:a", "pcm_s16le",
                 str(merged_audio),
             ]
-
-            print(f"[AUDIO MERGE] Mixing {len(norm_paths)} segments with adelay positioning...")
-            result = subprocess.run(mix_cmd, capture_output=True, text=True, timeout=60)
-
+            print(f"[AUDIO MERGE] Concatenating {len(concat_pieces)} audio pieces...")
+            result = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=60)
             if result.returncode != 0 or not merged_audio.exists():
-                print(f"[AUDIO MERGE] Adelay mix failed: {result.stderr[:200]}")
+                print(f"[AUDIO MERGE] Concat failed: {result.stderr[:200]}")
                 return {"final_output_path": video_path}
 
         # Log merged audio duration
@@ -844,9 +925,24 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
         if audio_dur is not None:
             print(f"[AUDIO MERGE] Merged audio duration: {audio_dur:.1f}s")
 
-        print(f"[AUDIO MERGE] Timestamp-aligned audio created: {merged_audio}")
+        # Trim if audio still extends past video
+        if video_duration is not None and audio_dur is not None and audio_dur > video_duration + 0.5:
+            trimmed_audio = Path(temp_dir) / "trimmed_audio.wav"
+            trim_cmd = [
+                "ffmpeg", "-y",
+                "-i", str(merged_audio),
+                "-af", f"atrim=0:{video_duration},asetpts=PTS-STARTPTS",
+                "-ar", str(SAMPLE_RATE), "-ac", "1", "-c:a", "pcm_s16le",
+                str(trimmed_audio),
+            ]
+            trim_result = subprocess.run(trim_cmd, capture_output=True, text=True, timeout=30)
+            if trim_result.returncode == 0 and trimmed_audio.exists():
+                merged_audio = trimmed_audio
+                print(f"[AUDIO MERGE] Trimmed audio to {video_duration:.1f}s to match video")
 
-        # Merge audio with video (apad pads audio with silence if shorter)
+        print(f"[AUDIO MERGE] Final audio track: {merged_audio}")
+
+        # Merge audio with video
         final_output = Path(temp_dir) / "final_with_audio.mp4"
         merge_cmd = [
             "ffmpeg", "-y",
@@ -862,11 +958,11 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
             str(final_output),
         ]
 
-        print("[AUDIO MERGE] Merging timestamp-aligned audio with video...")
+        print("[AUDIO MERGE] Merging audio track with video...")
         result = subprocess.run(merge_cmd, capture_output=True, text=True, timeout=120)
 
         if result.returncode != 0:
-            print(f"[AUDIO MERGE] Merge command failed: {result.stderr[:200]}")
+            print(f"[AUDIO MERGE] Merge failed: {result.stderr[:200]}")
             print("[AUDIO MERGE] Trying simple merge fallback...")
             simple_merge_cmd = [
                 "ffmpeg", "-y",
@@ -896,7 +992,29 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
 
     except Exception as e:
         print(f"[AUDIO MERGE] Error: {e}")
+        import traceback
+        traceback.print_exc()
         return {"final_output_path": video_path}
+
+
+def _build_atempo_chain(factor: float) -> str:
+    """Build an atempo filter chain for ffmpeg.
+
+    atempo only supports values between 0.5 and 100.0, so extreme
+    speed-ups are chained (e.g., 4x = atempo=2.0,atempo=2.0).
+    """
+    if factor <= 0:
+        return "atempo=1.0"
+    parts = []
+    remaining = factor
+    while remaining > 100.0:
+        parts.append("atempo=100.0")
+        remaining /= 100.0
+    while remaining < 0.5:
+        parts.append("atempo=0.5")
+        remaining /= 0.5
+    parts.append(f"atempo={remaining:.4f}")
+    return ",".join(parts)
 
 
 # ============================================================================
@@ -922,6 +1040,12 @@ def should_retry_or_continue(state: VideoGenState) -> Literal["recorrector", "re
 
 def should_fix_duration(state: VideoGenState) -> Literal["video_duration_fixer", "synchronizer"]:
     """Decide whether video duration needs fixing before sync."""
+    duration_mode = state.get("duration_mode", "guide")
+
+    if duration_mode == "guide":
+        print("[DURATION CHECK] Mode is 'guide' — skipping ffmpeg speed adjustment")
+        return "synchronizer"
+
     actual_duration = state.get("actual_duration")
     target_duration = state.get("target_duration", state.get("scene_length", 1.0) * 60)
 

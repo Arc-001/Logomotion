@@ -39,6 +39,7 @@ class Settings:
     video_length: float = 1.0
     explanation_depth: str = "detailed"
     video_orientation: str = "landscape"
+    duration_mode: str = "guide"  # "guide" = soft hint, "strict" = ffmpeg speed adjust
 
 
 @lru_cache(maxsize=1)
@@ -57,4 +58,5 @@ def get_settings() -> Settings:
         video_length=float(os.getenv("VIDEO_LENGTH", "1.0")),
         explanation_depth=os.getenv("EXPLANATION_DEPTH", "detailed"),
         video_orientation=os.getenv("VIDEO_ORIENTATION", "landscape"),
+        duration_mode=os.getenv("DURATION_MODE", "guide"),
     )

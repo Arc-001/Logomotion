@@ -121,6 +121,7 @@ async def generate_video(
     scene_length: float = 1.0,
     explanation_depth: str = "detailed",
     orientation: str = "landscape",
+    duration_mode: str = "guide",
     system_message: str = None,
 ) -> dict:
     """
@@ -132,6 +133,7 @@ async def generate_video(
         scene_length: Target length in minutes
         explanation_depth: Level of detail (basic, detailed, comprehensive)
         orientation: Video orientation (landscape or portrait)
+        duration_mode: 'guide' = soft hint (default), 'strict' = ffmpeg speed adjust
         system_message: Optional custom system prompt
     
     Returns:
@@ -143,6 +145,7 @@ async def generate_video(
         scene_length=scene_length,
         explanation_depth=explanation_depth,
         orientation=orientation,
+        duration_mode=duration_mode,
         system_message=system_message,
     )
     
@@ -159,6 +162,7 @@ def generate_video_sync(
     scene_length: float = 1.0,
     explanation_depth: str = "detailed",
     orientation: str = "landscape",
+    duration_mode: str = "guide",
     system_message: str = None,
 ) -> dict:
     """Synchronous version of generate_video."""
@@ -170,5 +174,6 @@ def generate_video_sync(
         scene_length=scene_length,
         explanation_depth=explanation_depth,
         orientation=orientation,
+        duration_mode=duration_mode,
         system_message=system_message,
     ))

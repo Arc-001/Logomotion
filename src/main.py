@@ -50,10 +50,12 @@ def cmd_generate(args):
     scene_length = args.length if args.length != 1.0 else settings.video_length
     explanation_depth = args.depth or settings.explanation_depth
     orientation = args.orientation or settings.video_orientation
+    duration_mode = args.duration_mode or settings.duration_mode
 
     print(f"[CONFIG] Scene length: {scene_length} minutes ({scene_length * 60} seconds)")
     print(f"[CONFIG] Explanation depth: {explanation_depth}")
     print(f"[CONFIG] Orientation: {orientation}")
+    print(f"[CONFIG] Duration mode: {duration_mode}")
 
     result = generate_video_sync(
         scene_title=args.title or "Generated Scene",
@@ -61,6 +63,7 @@ def cmd_generate(args):
         scene_length=scene_length,
         explanation_depth=explanation_depth,
         orientation=orientation,
+        duration_mode=duration_mode,
     )
 
     if result.get("final_output_path"):
@@ -146,6 +149,13 @@ def main():
         choices=["landscape", "portrait"],
         default=None,
         help="Video orientation (default: from .env or 'landscape')",
+    )
+    gen_parser.add_argument(
+        "--duration-mode",
+        choices=["strict", "guide"],
+        default=None,
+        dest="duration_mode",
+        help="Duration enforcement: 'guide' = soft hint (default), 'strict' = ffmpeg speed adjust",
     )
 
     serve_parser = subparsers.add_parser("serve", help="Start the API server")
