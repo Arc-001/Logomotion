@@ -128,14 +128,33 @@ def create_initial_state(
 - Total animation time should match the target length.
 
 ## ELEMENT POSITIONING (CRITICAL - AVOID OVERLAPS)
-- NEVER place elements at the same position. Always use explicit positioning.
-- The Manim frame is {frame_desc}.
-- Use .to_edge(UP/DOWN/LEFT/RIGHT) to anchor elements to screen edges.
-- Use .next_to(other_mobject, direction, buff=0.5) to position relative to others.
-- Use .shift(direction * amount) to move elements.
-- Group related elements with VGroup() and position the group.
-- Clear previous elements with FadeOut() before showing new ones in the same area.
-- {layout_hint}
+
+### RULE 1 — THE "CLEAR DESK" RULE (CRITICAL)
+    - Before starting a new major topic or showing a new full-screen text list, you MUST clear ALL previous elements first.
+    - REQUIRED: `self.play(FadeOut(VGroup(*self.mobjects)))` OR `self.clear()` — use one of these two patterns.
+    - NEVER render new text or visuals on top of existing elements that are already on screen.
+
+### RULE 2 — FORBIDDEN SYNTAX
+    - DO NOT use raw absolute coordinate arrays: NO `move_to([2, -1, 0])`, NO `move_to(np.array([x, y, 0]))`.
+    - These always produce miscalculated spacing and overlapping elements.
+
+### RULE 3 — MANDATORY RELATIVE POSITIONING
+    - ONLY position elements relative to screen edges or to other mobjects.
+    - Screen edges: `.to_edge(UP)`, `.to_edge(DOWN)`, `.to_edge(LEFT)`, `.to_edge(RIGHT)`.
+    - Stacking: `.next_to(other_mobject, DOWN, buff=0.5)` to place elements sequentially.
+    - Centering: `.move_to(ORIGIN)` is allowed (ORIGIN is a named constant, not a raw array).
+    - The Manim frame is {frame_desc}.
+    - {layout_hint}
+
+### RULE 4 — STANDARD GRID LAYOUT
+    - Scene titles: ALWAYS `.to_edge(UP, buff=0.5)`.
+    - Core visuals (graphs, arrays, diagrams): Anchor to `ORIGIN` or `.to_edge(LEFT, buff=1)`.
+    - Explanatory text / bullet lists: Anchor `.to_edge(RIGHT, buff=1)` or stack below the title using `.next_to`.
+
+### RULE 5 — BOUNDING BOX SAFETY (VGROUPS)
+    - Whenever creating multiple lines of text or a complex diagram, wrap them in a `VGroup()`.
+    - IMMEDIATELY after building the group, apply: `my_group.scale_to_fit_width(min(my_group.width, config.frame_width - 2))`
+    - This prevents any element from bleeding off-screen.
 
 ## ANIMATION QUALITY
 - Always FadeOut or Transform old elements before introducing new ones.

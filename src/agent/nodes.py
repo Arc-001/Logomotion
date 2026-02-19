@@ -281,30 +281,61 @@ accurate, current, and informative:
 {web_section}
 ## CRITICAL REQUIREMENTS (MUST FOLLOW STRICTLY):
 
-### 1. SCREEN BOUNDS - NEVER GO OUT OF FRAME
-- The Manim frame is {frame_width} and {frame_height}
-- ALWAYS use .scale() to keep objects within bounds (typical scale: 0.5 to 0.8 for text)
-- ALWAYS check positions: x should be in {x_bounds}, y should be in {y_bounds} to leave margins
-- For multiple elements, use VGroup and .arrange(DOWN/RIGHT, buff=0.3) then scale the group
-- NEVER animate objects that start or end outside the visible frame
+### 1. SCREEN BOUNDS — NEVER GO OUT OF FRAME
+- The Manim frame is {frame_width} wide and {frame_height} tall.
+- Keep objects within bounds (typical text scale: 0.5 to 0.8).
+- x must stay within {x_bounds}, y within {y_bounds} (leave margins).
 - {layout_note}
+- **BOUNDING BOX SAFETY:** Every `VGroup` with multiple text lines or diagram pieces MUST be scaled immediately after construction:
+  `my_group.scale_to_fit_width(min(my_group.width, config.frame_width - 2))`
 
-### 2. POSITIONING - PREVENT ALL OVERLAPS
-- Title: ALWAYS use .to_edge(UP, buff=0.5) with .scale(0.7)
-- Main content: Use .move_to(ORIGIN) or explicit coordinates
-- Side elements: Use .to_edge(LEFT/RIGHT, buff=0.5)
-- Labels: Use .next_to(target, direction, buff=0.3)
-- ALWAYS FadeOut() previous elements before showing new ones in the same area
-- Use .shift() with small values (max 2 units) for adjustments
+### 2. POSITIONING — FORBIDDEN AND REQUIRED PATTERNS
+**FORBIDDEN (NEVER USE):**
+- `move_to([2, -1, 0])` — raw coordinate arrays are BANNED.
+- `move_to(np.array([x, y, 0]))` — BANNED.
+- Any hard-coded spatial number pair used to separate or offset elements.
 
-### 3. SAFE LAYOUT PATTERN (FOLLOW THIS)
+**REQUIRED (ALWAYS USE):**
+- Screen edges: `.to_edge(UP)`, `.to_edge(DOWN)`, `.to_edge(LEFT)`, `.to_edge(RIGHT)`.
+- Sequential stacking: `.next_to(other_mobject, DOWN, buff=0.5)`.
+- Centering: `.move_to(ORIGIN)` is the ONLY allowed positional constant (it is not a raw array).
+- Title: ALWAYS `.to_edge(UP, buff=0.5)`.
+- Side elements: `.to_edge(LEFT, buff=1)` or `.to_edge(RIGHT, buff=1)`.
+- Labels: `.next_to(target, direction, buff=0.3)`.
+
+### 3. MANDATORY STANDARD GRID LAYOUT
+- **Scene title**: `.to_edge(UP, buff=0.5)` — always, no exceptions.
+- **Core visualization** (graph, array, diagram): `ORIGIN` or `.to_edge(LEFT, buff=1)`.
+- **Explanatory text / bullets**: `.to_edge(RIGHT, buff=1)` or `.next_to(title, DOWN, buff=0.5)`.
+
+### 3a. THE "CLEAR DESK" RULE — CRITICAL
+Before a new major topic or any new full-screen text list, ERASE all current elements:
 ```python
-# Title at top
+self.play(FadeOut(VGroup(*self.mobjects)))  # clear desk before new topic
+```
+Or use `self.clear()`. NEVER render new content on top of still-visible old elements.
+
+### 3b. SAFE LAYOUT PATTERN (FOLLOW THIS EXACTLY)
+```python
+# --- New topic: clear the desk first ---
+self.play(FadeOut(VGroup(*self.mobjects)))
+
+# Title always at top edge
 title = Text("Title").scale(0.7).to_edge(UP, buff=0.5)
-# Main content in center (scaled to fit)
-content = VGroup(item1, item2, item3).arrange(DOWN, buff=0.3).scale(0.6).move_to(ORIGIN)
-# Labels positioned relative to content
-label = Text("Label").scale(0.4).next_to(content, RIGHT, buff=0.5)
+self.play(Write(title))
+
+# Multi-line content: VGroup → scale to fit → position relative to title
+bullets = VGroup(
+    Text("Point 1").scale(0.5),
+    Text("Point 2").scale(0.5),
+    Text("Point 3").scale(0.5),
+).arrange(DOWN, buff=0.3)
+bullets.scale_to_fit_width(min(bullets.width, config.frame_width - 2))
+bullets.next_to(title, DOWN, buff=0.5)
+self.play(FadeIn(bullets))
+
+# Side label: always relative to another object, never absolute coords
+label = Text("Note").scale(0.4).next_to(bullets, RIGHT, buff=0.5)
 ```
 
 ### 4. DURATION
