@@ -14,6 +14,7 @@ from .nodes import (
     video_duration_fixer_node,
     synchronizer_node,
     audio_video_merger_node,
+    web_research_node,
     should_retry_or_continue,
     should_fix_duration,
 )
@@ -23,37 +24,39 @@ def build_video_gen_graph() -> StateGraph:
     """
     Build the complete LangGraph for video generation.
     
-    Graph structure (matching the architecture diagram):
+    Graph structure:
     
     START
       │
-      ▼
-    [video_code_gen] ─────────────────────────┐
-      │                                        │
-      │ code, transcript                       │
-      ▼                                        ▼
-    [code_executor]                [transcript_processor]
-      │                                        │
-      ├──error?──► [recorrector] ◄────────┐   │
-      │            │                       │   │
-      │            └───────────────────────┘   │
-      │                                        │
-      ▼ rendered video                         │
-    [render_checker]                           │
-      │                                        │
-      ├──duration off?──► [video_duration_fixer]│
-      │                          │             │
-      ▼                          ▼             │
-    [synchronizer] ◄───────────────────────────┘
-      │
-      ▼
-    [audio_video_merger]
-      │
-      ▼
-     END
+      ├──web_search_enabled?──► [web_research] ──┐
+      │                                           │
+      └───────────────────────────────────────────┤
+                                                  ▼
+                                         [video_code_gen] ─────────────────┐
+                                           │                                │
+                                           │ code, transcript               │
+                                           ▼                                ▼
+                                         [code_executor]       [transcript_processor]
+                                           │                                │
+                                           ├──error?──► [recorrector]    │
+                                           │                               │
+                                           ▼ rendered video               │
+                                         [render_checker]                  │
+                                           │                               │
+                                           ├──duration off?──► [video_duration_fixer]
+                                           ▼                               │
+                                         [synchronizer] ◄──────────────────┘
+                                           │
+                                           ▼
+                                         [audio_video_merger]
+                                           │
+                                           ▼
+                                          END
     """
     builder = StateGraph(VideoGenState)
-    
+
+    # Register all nodes
+    builder.add_node("web_research", web_research_node)
     builder.add_node("video_code_gen", video_code_gen_node)
     builder.add_node("code_executor", code_executor_node)
     builder.add_node("recorrector", recorrector_node)
@@ -62,9 +65,22 @@ def build_video_gen_graph() -> StateGraph:
     builder.add_node("video_duration_fixer", video_duration_fixer_node)
     builder.add_node("synchronizer", synchronizer_node)
     builder.add_node("audio_video_merger", audio_video_merger_node)
-    
-    builder.set_entry_point("video_code_gen")
-    
+
+    # Conditional entry: run web research first when toggle is on
+    def _entry_router(state: VideoGenState) -> str:
+        return "web_research" if state.get("web_search_enabled") else "video_code_gen"
+
+    builder.set_conditional_entry_point(
+        _entry_router,
+        {
+            "web_research": "web_research",
+            "video_code_gen": "video_code_gen",
+        },
+    )
+
+    # web_research always feeds directly into code gen
+    builder.add_edge("web_research", "video_code_gen")
+
     # After code generation, run both executor and transcript processor in parallel
     builder.add_edge("video_code_gen", "code_executor")
     builder.add_edge("video_code_gen", "transcript_processor")
@@ -122,6 +138,7 @@ async def generate_video(
     explanation_depth: str = "detailed",
     orientation: str = "landscape",
     duration_mode: str = "guide",
+    web_search_enabled: bool = False,
     system_message: str = None,
 ) -> dict:
     """
@@ -134,6 +151,7 @@ async def generate_video(
         explanation_depth: Level of detail (basic, detailed, comprehensive)
         orientation: Video orientation (landscape or portrait)
         duration_mode: 'guide' = soft hint (default), 'strict' = ffmpeg speed adjust
+        web_search_enabled: Fetch latest web/Wikipedia data before generating
         system_message: Optional custom system prompt
     
     Returns:
@@ -146,6 +164,7 @@ async def generate_video(
         explanation_depth=explanation_depth,
         orientation=orientation,
         duration_mode=duration_mode,
+        web_search_enabled=web_search_enabled,
         system_message=system_message,
     )
     
@@ -163,6 +182,7 @@ def generate_video_sync(
     explanation_depth: str = "detailed",
     orientation: str = "landscape",
     duration_mode: str = "guide",
+    web_search_enabled: bool = False,
     system_message: str = None,
 ) -> dict:
     """Synchronous version of generate_video."""
@@ -175,5 +195,6 @@ def generate_video_sync(
         explanation_depth=explanation_depth,
         orientation=orientation,
         duration_mode=duration_mode,
+        web_search_enabled=web_search_enabled,
         system_message=system_message,
     ))

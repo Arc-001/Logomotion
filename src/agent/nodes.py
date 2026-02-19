@@ -12,6 +12,7 @@ Implements the following nodes from the architecture diagram:
 8. audio_video_merger_node - Final merge
 """
 
+import asyncio
 import re
 import shutil
 import subprocess
@@ -125,6 +126,67 @@ DEPTH_CONFIGS = {
 
 
 # ============================================================================
+# NODE 0: Web Research (optional — runs only when web_search_enabled=True)
+# ============================================================================
+
+def web_research_node(state: VideoGenState) -> dict:
+    """
+    Gather the latest real-world information about the animation topic.
+
+    Uses an LLM to craft search queries, then runs DuckDuckGo + Wikipedia
+    searches in parallel, scrapes the top results, and synthesises a compact
+    research brief that is injected into the code-gen prompt.
+
+    Input:  scene_prompt_description, web_search_enabled
+    Output: web_context (str), web_sources (list[dict])
+    """
+    topic = state.get("scene_prompt_description", "")
+    print(f"[WebResearch] Node triggered for topic: {topic!r}")
+
+    try:
+        from ..search.web import research_topic  # import here to keep cold-start fast
+
+        # research_topic is async — run it in the current event loop (or a new one)
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                # We are inside an async context (e.g. FastAPI background task)
+                # Use asyncio.run_coroutine_threadsafe or nest_asyncio approach.
+                # The simplest portable solution: create a new loop in a thread.
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    future = ex.submit(asyncio.run, research_topic(topic, llm_chat))
+                    brief = future.result(timeout=120)
+            else:
+                brief = loop.run_until_complete(research_topic(topic, llm_chat))
+        except RuntimeError:
+            brief = asyncio.run(research_topic(topic, llm_chat))
+
+        web_context = brief.to_prompt_block()
+        web_sources = [
+            {
+                "url": s.url,
+                "title": s.title,
+                "snippet": s.snippet,
+                "source_type": s.source_type,
+            }
+            for s in brief.sources
+        ]
+        print(f"[WebResearch] Brief ready: {len(brief.key_facts)} facts, "
+              f"{len(brief.sources)} sources")
+
+    except Exception as exc:
+        print(f"[WebResearch] Node failed with: {exc}")
+        web_context = f"[Web research unavailable: {exc}]"
+        web_sources = []
+
+    return {
+        "web_context": web_context,
+        "web_sources": web_sources,
+    }
+
+
+# ============================================================================
 # NODE 1: Video Code Generator (with Graph RAG)
 # ============================================================================
 
@@ -195,6 +257,20 @@ Used animations: {', '.join(result.used_animations)}
 - Use self.wait(1) to self.wait(3) between sections
 - Use run_time=2 for major animations"""
 
+    # Optionally inject web research context gathered by web_research_node
+    web_context_block = state.get("web_context", "")
+    if web_context_block and not web_context_block.startswith("[Web research"):
+        web_section = f"""
+## Real-World Research Context (USE THIS DATA IN YOUR ANIMATION)
+The following up-to-date information was retrieved from the web specifically for this topic.
+Use concrete facts, numbers, and recent developments from this research to make the animation
+accurate, current, and informative:
+
+{web_context_block}
+"""
+    else:
+        web_section = ""
+
     prompt = f"""Create a Manim animation based on this request:
 
 **Title:** {state["scene_title"]}
@@ -202,7 +278,7 @@ Used animations: {', '.join(result.used_animations)}
 **Target Duration:** {target_seconds} seconds ({state["scene_length"]} minutes)
 **Explanation Level:** {depth} - {depth_config["detail_level"]}
 **Orientation:** {orientation} ({frame_width} × {frame_height})
-
+{web_section}
 ## CRITICAL REQUIREMENTS (MUST FOLLOW STRICTLY):
 
 ### 1. SCREEN BOUNDS - NEVER GO OUT OF FRAME

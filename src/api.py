@@ -66,6 +66,10 @@ class GenerateRequest(BaseModel):
         default=None,
         description="Duration enforcement: 'guide' = soft hint (default), 'strict' = ffmpeg speed adjust",
     )
+    web_search: bool = Field(
+        default=False,
+        description="Fetch latest web / Wikipedia data before generating the animation",
+    )
 
     @model_validator(mode="after")
     def apply_defaults_and_validate(self):
@@ -99,6 +103,7 @@ class JobStatus(BaseModel):
     video_path: Optional[str] = None
     code: Optional[str] = None
     error: Optional[str] = None
+    web_sources: Optional[list] = None  # populated when web_search was used
 
 
 # Simple in-memory job store
@@ -149,6 +154,7 @@ async def generate_video(request: GenerateRequest, background_tasks: BackgroundT
         request.depth,
         request.orientation,
         request.duration_mode,
+        request.web_search,
     )
 
     return GenerateResponse(
@@ -227,6 +233,7 @@ async def _run_generation_job(
     depth: str,
     orientation: str,
     duration_mode: str,
+    web_search: bool = False,
 ):
     """Background task to run video generation."""
     from .agent.graph import generate_video
@@ -241,6 +248,7 @@ async def _run_generation_job(
             explanation_depth=depth,
             orientation=orientation,
             duration_mode=duration_mode,
+            web_search_enabled=web_search,
         )
 
         video_path = result.get("final_output_path") or result.get("rendered_video_path")
@@ -251,6 +259,7 @@ async def _run_generation_job(
                 status="completed",
                 video_path=video_path,
                 code=result.get("code"),
+                web_sources=result.get("web_sources") or None,
             )
         else:
             jobs[job_id] = JobStatus(

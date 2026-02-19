@@ -58,6 +58,28 @@
           </select>
         </div>
       </div>
+
+      <!-- Web Search Toggle -->
+      <div class="web-search-row">
+        <label class="toggle-label" :class="{ active: form.web_search }">
+          <div class="toggle-track" @click="form.web_search = !form.web_search">
+            <div class="toggle-thumb" :class="{ on: form.web_search }"></div>
+          </div>
+          <div class="toggle-text">
+            <span class="toggle-title">
+              <svg v-if="form.web_search" class="icon-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+              </svg>
+              Live Web Research
+            </span>
+            <span class="toggle-desc">
+              LLM-crafted queries · DuckDuckGo + Wikipedia · Top-5 scraping · Grounded animation
+            </span>
+          </div>
+        </label>
+      </div>
+
       <div v-if="error" class="form-error">{{ error }}</div>
       <div class="form-actions">
         <button type="submit" class="btn btn-primary" :disabled="submitting || !form.prompt.trim()">
@@ -82,6 +104,7 @@ const form = reactive({
   depth: 'detailed',
   orientation: 'landscape',
   duration_mode: 'guide',
+  web_search: false,
 })
 const submitting = ref(false)
 const error = ref('')
@@ -100,6 +123,7 @@ async function submit() {
         depth: form.depth,
         orientation: form.orientation,
         duration_mode: form.duration_mode,
+        web_search: form.web_search,
       }),
     })
     emit('submitted', data)
@@ -222,5 +246,90 @@ async function submit() {
   display: flex;
   justify-content: flex-end;
   margin-top: 8px;
+}
+
+/* Web-search toggle */
+.web-search-row {
+  margin-top: 4px;
+}
+
+.toggle-label {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  cursor: default;
+  transition: border-color var(--transition), background var(--transition);
+  user-select: none;
+}
+
+.toggle-label.active {
+  border-color: var(--accent);
+  background: var(--accent-subtle, rgba(99,102,241,0.08));
+}
+
+.toggle-track {
+  position: relative;
+  width: 42px;
+  height: 24px;
+  flex-shrink: 0;
+  background: var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.toggle-label.active .toggle-track {
+  background: var(--accent);
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+  transition: transform 0.2s ease;
+}
+
+.toggle-thumb.on {
+  transform: translateX(18px);
+}
+
+.toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.toggle-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.toggle-label.active .toggle-title {
+  color: var(--accent);
+}
+
+.icon-globe {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.toggle-desc {
+  font-size: 11px;
+  color: var(--text-secondary);
+  letter-spacing: 0.2px;
 }
 </style>

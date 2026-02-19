@@ -57,6 +57,11 @@ class VideoGenState(TypedDict):
     orientation: str  # "landscape" or "portrait"
     duration_mode: str  # "guide" = soft hint, "strict" = ffmpeg speed adjust
     
+    # Web research (optional — toggled by the API request)
+    web_search_enabled: bool          # Whether to run web research before code gen
+    web_context: str                  # Formatted research brief injected into code-gen prompt
+    web_sources: list[dict]           # Serialised WebSource list for job metadata
+
     retrieved_examples: list[str]  # Code examples from Graph RAG
     retrieved_context: str  # Formatted context for LLM
     
@@ -99,6 +104,7 @@ def create_initial_state(
     explanation_depth: str = "detailed",
     orientation: str = "landscape",
     duration_mode: str = "guide",
+    web_search_enabled: bool = False,
     system_message: Optional[str] = None,
     max_retries: Optional[int] = None,
 ) -> VideoGenState:
@@ -152,7 +158,11 @@ def create_initial_state(
         explanation_depth=explanation_depth,
         orientation=orientation,
         duration_mode=duration_mode,
-        
+
+        web_search_enabled=web_search_enabled,
+        web_context="",
+        web_sources=[],
+
         retrieved_examples=[],
         retrieved_context="",
         

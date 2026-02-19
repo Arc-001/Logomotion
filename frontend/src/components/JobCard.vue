@@ -27,6 +27,24 @@
     <div v-if="job.error" class="job-error">{{ job.error }}</div>
 
     <div v-if="showCode && job.code" class="code-block">{{ job.code }}</div>
+
+    <!-- Web research sources (shown when web_search was used) -->
+    <div v-if="job.web_sources && job.web_sources.length" class="sources-section">
+      <button class="sources-toggle" @click="showSources = !showSources">
+        <svg class="icon-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
+          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+        </svg>
+        {{ showSources ? 'Hide' : 'Show' }} {{ job.web_sources.length }} web source{{ job.web_sources.length !== 1 ? 's' : '' }}
+      </button>
+      <ul v-if="showSources" class="sources-list">
+        <li v-for="(src, i) in job.web_sources" :key="i" class="source-item">
+          <span class="source-badge" :class="'badge-' + src.source_type">{{ src.source_type }}</span>
+          <a :href="src.url" target="_blank" rel="noopener" class="source-link">{{ src.title || src.url }}</a>
+          <span v-if="src.snippet" class="source-snippet">{{ src.snippet.slice(0, 120) }}…</span>
+        </li>
+      </ul>
+    </div>
   </div>
 </template>
 
@@ -39,6 +57,7 @@ const props = defineProps({
 })
 
 const showCode = ref(false)
+const showSources = ref(false)
 const jobDownloadUrl = computed(() => downloadUrl(props.job.job_id))
 </script>
 
@@ -151,5 +170,78 @@ const jobDownloadUrl = computed(() => downloadUrl(props.job.job_id))
   0%   { width: 0%;   margin-left: 0%; }
   50%  { width: 40%;  margin-left: 30%; }
   100% { width: 0%;   margin-left: 100%; }
+}
+
+/* Web sources */
+.sources-section {
+  margin-top: 10px;
+}
+
+.sources-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.icon-globe {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+}
+
+.sources-list {
+  list-style: none;
+  margin: 8px 0 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.source-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 12px;
+  background: var(--bg-primary, var(--bg-secondary));
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+}
+
+.source-badge {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  width: fit-content;
+}
+
+.badge-wikipedia { background: var(--accent-subtle); color: var(--accent); }
+.badge-web       { background: var(--success-bg, rgba(34,197,94,0.1)); color: var(--success, #16a34a); }
+
+.source-link {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  word-break: break-all;
+}
+
+.source-snippet {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.5;
 }
 </style>
