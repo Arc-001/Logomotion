@@ -514,6 +514,31 @@ CRITICAL API RULES:
 - Use Create() not ShowCreation()
 - Use MathTex(r"...") with raw strings
 
+CRITICAL LAYOUT RULES (enforce these while fixing — do NOT introduce violations):
+
+1. THE "CLEAR DESK" RULE
+   - Before every new major topic or full-screen text list, ALL previous elements must be cleared.
+   - Use: self.play(FadeOut(VGroup(*self.mobjects)))  OR  self.clear()
+   - NEVER place new content on top of still-visible old elements.
+
+2. FORBIDDEN SYNTAX — ABSOLUTE COORDINATES
+   - NEVER use raw coordinate arrays: move_to([2, -1, 0]) or move_to(np.array([x, y, 0])) are BANNED.
+   - Replace any such calls with relative positioning (see rule 3).
+
+3. MANDATORY RELATIVE POSITIONING
+   - Anchor to screen edges: .to_edge(UP), .to_edge(DOWN), .to_edge(LEFT), .to_edge(RIGHT)
+   - Stack elements: .next_to(other_mobject, DOWN, buff=0.5)
+   - Center: .move_to(ORIGIN) is allowed (named constant, not a raw array)
+
+4. STANDARD GRID LAYOUT
+   - Titles: always .to_edge(UP, buff=0.5)
+   - Core visuals (graphs, arrays): ORIGIN or .to_edge(LEFT, buff=1)
+   - Explanatory text / bullets: .to_edge(RIGHT, buff=1) or .next_to(title, DOWN, buff=0.5)
+
+5. BOUNDING BOX SAFETY
+   - Every VGroup with multiple items must be scaled after construction:
+     my_group.scale_to_fit_width(min(my_group.width, config.frame_width - 2))
+
 Fix the error and return ONLY the corrected Python code."""},
         {"role": "user", "content": f"""
 The following Manim code produced an error:
