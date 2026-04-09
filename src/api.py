@@ -48,7 +48,7 @@ class GenerateRequest(BaseModel):
         description="Topic for the animation — used as prompt if prompt is not set",
     )
     title: Optional[str] = Field(None, description="Scene title")
-    length: float = Field(
+    length: Optional[float] = Field(
         default=None,
         ge=0.1,
         le=30.0,
