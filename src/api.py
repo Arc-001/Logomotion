@@ -48,7 +48,7 @@ class GenerateRequest(BaseModel):
         description="Topic for the animation — used as prompt if prompt is not set",
     )
     title: Optional[str] = Field(None, description="Scene title")
-    length: float = Field(
+    length: Optional[float] = Field(
         default=None,
         ge=0.1,
         le=30.0,
@@ -107,6 +107,7 @@ class JobStatus(BaseModel):
 
 
 # Simple in-memory job store
+_MAX_JOBS = 1000
 jobs: dict[str, JobStatus] = {}
 
 
@@ -138,7 +139,16 @@ async def generate_video(request: GenerateRequest, background_tasks: BackgroundT
     (basic / detailed / comprehensive).  Returns immediately with a job ID
     that can be polled via ``GET /jobs/{job_id}``.
     """
-    job_id = str(uuid.uuid4())[:8]
+    job_id = str(uuid.uuid4())[:12]
+
+    # Evict oldest completed/failed jobs when store is full
+    if len(jobs) >= _MAX_JOBS:
+        to_remove = [
+            jid for jid, j in jobs.items()
+            if j.status in ("completed", "failed")
+        ]
+        for jid in to_remove[:len(jobs) - _MAX_JOBS + 1]:
+            del jobs[jid]
 
     jobs[job_id] = JobStatus(
         job_id=job_id,

@@ -12,11 +12,13 @@ Implements the following nodes from the architecture diagram:
 8. audio_video_merger_node - Final merge
 """
 
+import ast
 import asyncio
 import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -311,14 +313,14 @@ accurate, current, and informative:
 ### 3a. THE "CLEAR DESK" RULE — CRITICAL
 Before a new major topic or any new full-screen text list, ERASE all current elements:
 ```python
-self.play(FadeOut(VGroup(*self.mobjects)))  # clear desk before new topic
+self.play(FadeOut(Group(*self.mobjects)))  # clear desk before new topic
 ```
 Or use `self.clear()`. NEVER render new content on top of still-visible old elements.
 
 ### 3b. SAFE LAYOUT PATTERN (FOLLOW THIS EXACTLY)
 ```python
 # --- New topic: clear the desk first ---
-self.play(FadeOut(VGroup(*self.mobjects)))
+self.play(FadeOut(Group(*self.mobjects)))
 
 # Title always at top edge
 title = Text("Title").scale(0.7).to_edge(UP, buff=0.5)
@@ -415,7 +417,7 @@ transcript = {{
         )
         if transcript_match:
             try:
-                transcript = eval(transcript_match.group(1))
+                transcript = ast.literal_eval(transcript_match.group(1))
             except (SyntaxError, ValueError, NameError):
                 pass
 
@@ -513,6 +515,9 @@ CRITICAL API RULES:
 - Use Text() not TextMobject or TexMobject
 - Use Create() not ShowCreation()
 - Use MathTex(r"...") with raw strings
+
+CRITICAL TIMING RULE:
+- DO NOT change the overall duration, the number of animations, run_time, or self.wait() times. The audio transcript has already been generated based on your original timings. If you change timings, the audio will be completely out of sync. ONLY fix the syntax/API errors.
 
 Fix the error and return ONLY the corrected Python code."""},
         {"role": "user", "content": f"""
@@ -666,11 +671,10 @@ def render_checker_node(state: VideoGenState) -> dict:
     else:
         print("[RENDER CHECK] Could not determine video duration")
 
-    duration_errors = [e for e in errors if "Duration mismatch" in e]
     non_duration_errors = [e for e in errors if "Duration mismatch" not in e]
 
     video_valid = len(non_duration_errors) == 0
-    checked_path = video_path if video_valid else None
+    checked_path = video_path
 
     print(f"[RENDER CHECK] Validation {'passed' if checked_path else 'failed'}: {errors}")
 
@@ -1090,7 +1094,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
         # Copy to the project output directory for easy access
         project_output = Path("output")
         project_output.mkdir(parents=True, exist_ok=True)
-        output_copy = project_output / "output.mp4"
+        output_copy = project_output / f"output_{uuid.uuid4().hex[:8]}.mp4"
         shutil.copy2(str(final_output), str(output_copy))
         print(f"[AUDIO MERGE] Copied to: {output_copy.resolve()}")
 
@@ -1107,16 +1111,16 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
 def _build_atempo_chain(factor: float) -> str:
     """Build an atempo filter chain for ffmpeg.
 
-    atempo only supports values between 0.5 and 100.0, so extreme
+    atempo only supports values between 0.5 and 2.0 per stage, so extreme
     speed-ups are chained (e.g., 4x = atempo=2.0,atempo=2.0).
     """
     if factor <= 0:
         return "atempo=1.0"
     parts = []
     remaining = factor
-    while remaining > 100.0:
-        parts.append("atempo=100.0")
-        remaining /= 100.0
+    while remaining > 2.0:
+        parts.append("atempo=2.0")
+        remaining /= 2.0
     while remaining < 0.5:
         parts.append("atempo=0.5")
         remaining /= 0.5

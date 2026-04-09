@@ -131,7 +131,7 @@ def create_initial_state(
 
 ### RULE 1 — THE "CLEAR DESK" RULE (CRITICAL)
     - Before starting a new major topic or showing a new full-screen text list, you MUST clear ALL previous elements first.
-    - REQUIRED: `self.play(FadeOut(VGroup(*self.mobjects)))` OR `self.clear()` — use one of these two patterns.
+    - REQUIRED: `self.play(FadeOut(Group(*self.mobjects)))` OR `self.clear()` — use one of these two patterns.
     - NEVER render new text or visuals on top of existing elements that are already on screen.
 
 ### RULE 2 — FORBIDDEN SYNTAX
