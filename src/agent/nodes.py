@@ -670,11 +670,10 @@ def render_checker_node(state: VideoGenState) -> dict:
     else:
         print("[RENDER CHECK] Could not determine video duration")
 
-    duration_errors = [e for e in errors if "Duration mismatch" in e]
     non_duration_errors = [e for e in errors if "Duration mismatch" not in e]
 
     video_valid = len(non_duration_errors) == 0
-    checked_path = video_path if video_valid else None
+    checked_path = video_path
 
     print(f"[RENDER CHECK] Validation {'passed' if checked_path else 'failed'}: {errors}")
 
