@@ -12,6 +12,7 @@ Implements the following nodes from the architecture diagram:
 8. audio_video_merger_node - Final merge
 """
 
+import ast
 import asyncio
 import re
 import shutil
@@ -311,14 +312,14 @@ accurate, current, and informative:
 ### 3a. THE "CLEAR DESK" RULE — CRITICAL
 Before a new major topic or any new full-screen text list, ERASE all current elements:
 ```python
-self.play(FadeOut(VGroup(*self.mobjects)))  # clear desk before new topic
+self.play(FadeOut(Group(*self.mobjects)))  # clear desk before new topic
 ```
 Or use `self.clear()`. NEVER render new content on top of still-visible old elements.
 
 ### 3b. SAFE LAYOUT PATTERN (FOLLOW THIS EXACTLY)
 ```python
 # --- New topic: clear the desk first ---
-self.play(FadeOut(VGroup(*self.mobjects)))
+self.play(FadeOut(Group(*self.mobjects)))
 
 # Title always at top edge
 title = Text("Title").scale(0.7).to_edge(UP, buff=0.5)
@@ -415,7 +416,7 @@ transcript = {{
         )
         if transcript_match:
             try:
-                transcript = eval(transcript_match.group(1))
+                transcript = ast.literal_eval(transcript_match.group(1))
             except (SyntaxError, ValueError, NameError):
                 pass
 
@@ -513,6 +514,9 @@ CRITICAL API RULES:
 - Use Text() not TextMobject or TexMobject
 - Use Create() not ShowCreation()
 - Use MathTex(r"...") with raw strings
+
+CRITICAL TIMING RULE:
+- DO NOT change the overall duration, the number of animations, run_time, or self.wait() times. The audio transcript has already been generated based on your original timings. If you change timings, the audio will be completely out of sync. ONLY fix the syntax/API errors.
 
 Fix the error and return ONLY the corrected Python code."""},
         {"role": "user", "content": f"""
