@@ -1110,16 +1110,16 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
 def _build_atempo_chain(factor: float) -> str:
     """Build an atempo filter chain for ffmpeg.
 
-    atempo only supports values between 0.5 and 100.0, so extreme
+    atempo only supports values between 0.5 and 2.0 per stage, so extreme
     speed-ups are chained (e.g., 4x = atempo=2.0,atempo=2.0).
     """
     if factor <= 0:
         return "atempo=1.0"
     parts = []
     remaining = factor
-    while remaining > 100.0:
-        parts.append("atempo=100.0")
-        remaining /= 100.0
+    while remaining > 2.0:
+        parts.append("atempo=2.0")
+        remaining /= 2.0
     while remaining < 0.5:
         parts.append("atempo=0.5")
         remaining /= 0.5
