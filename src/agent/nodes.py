@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -1093,7 +1094,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
         # Copy to the project output directory for easy access
         project_output = Path("output")
         project_output.mkdir(parents=True, exist_ok=True)
-        output_copy = project_output / "output.mp4"
+        output_copy = project_output / f"output_{uuid.uuid4().hex[:8]}.mp4"
         shutil.copy2(str(final_output), str(output_copy))
         print(f"[AUDIO MERGE] Copied to: {output_copy.resolve()}")
 
