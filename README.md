@@ -203,11 +203,11 @@ Logomotion/
 
 ## Demos
 
-<video src="https://github.com/Arc-001/Logomotion/blob/3bd3ca4ee2fdc92c05d77e7390107ad60589ed0f/assets/1.mp4" width="600" controls></video>
+<video src="https://github.com/Arc-001/Logomotion/raw/main/assets/1.mp4" width="600" controls></video>
 
-<video src="https://github.com/Arc-001/Logomotion/blob/3bd3ca4ee2fdc92c05d77e7390107ad60589ed0f/assets/2.mp4" width="600" controls></video>
+<video src="https://github.com/Arc-001/Logomotion/raw/main/assets/2.mp4" width="600" controls></video>
 
-<video src="https://github.com/Arc-001/Logomotion/blob/3bd3ca4ee2fdc92c05d77e7390107ad60589ed0f/assets/3.mp4" width="600" controls></video>
+<video src="https://github.com/Arc-001/Logomotion/raw/main/assets/3.mp4" width="600" controls></video>
 
 ## License
 
