@@ -34,6 +34,9 @@ def normalize_render_quality(value: str) -> str:
 class Settings:
     """Application-wide settings loaded from environment variables."""
 
+    # API server
+    cors_allow_origins: tuple = ("http://localhost:5173", "http://localhost:8000")
+
     # OpenRouter / LLM
     openrouter_api_key: str = ""
     openrouter_model: str = "google/gemini-3-flash-preview"
@@ -74,6 +77,13 @@ class Settings:
 def get_settings() -> Settings:
     """Return a cached Settings instance populated from the environment."""
     return Settings(
+        cors_allow_origins=tuple(
+            origin.strip()
+            for origin in os.getenv(
+                "CORS_ALLOW_ORIGINS", "http://localhost:5173,http://localhost:8000"
+            ).split(",")
+            if origin.strip()
+        ),
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
         openrouter_model=os.getenv("OPENROUTER_MODEL", "google/gemini-3-flash-preview"),
         openrouter_base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),

@@ -27,7 +27,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(get_settings().cors_allow_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -326,3 +326,9 @@ async def _run_generation_job(
 # ---------------------------------------------------------------------------
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# The Vite build references its hashed bundles as /assets/..., so the
+# assets directory must be mounted at that exact path.
+_ASSETS_DIR = STATIC_DIR / "assets"
+if _ASSETS_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="assets")
