@@ -84,7 +84,7 @@ class _EmptyRetriever:
     def __init__(self):
         self.closed = False
 
-    def hybrid_search(self, query, limit=3):
+    def hybrid_search(self, query, limit=3, **kwargs):
         return []
 
     def close(self):
@@ -97,7 +97,7 @@ class _RaisingRetriever:
     def __init__(self):
         pass
 
-    def hybrid_search(self, query, limit=3):
+    def hybrid_search(self, query, limit=3, **kwargs):
         raise RuntimeError("db unreachable")
 
     def close(self):
@@ -437,3 +437,54 @@ class TestLlmChatRetry:
 
         assert result is None
         assert completions.calls == 3
+
+
+# ============================================================================
+# _extract_rag_hints / _truncate_code_example
+# ============================================================================
+
+class TestExtractRagHints:
+    def test_direct_class_and_animation_names(self):
+        from src.agent.nodes import _extract_rag_hints
+
+        classes, animations = _extract_rag_hints("Show a Circle and FadeIn a Square")
+        assert "Circle" in classes and "Square" in classes
+        assert "FadeIn" in animations
+
+    def test_keyword_mapping(self):
+        from src.agent.nodes import _extract_rag_hints
+
+        classes, animations = _extract_rag_hints("Plot the graph of a quadratic equation")
+        assert "Axes" in classes
+        assert "MathTex" in classes
+
+    def test_no_hints_for_unrelated_text(self):
+        from src.agent.nodes import _extract_rag_hints
+
+        classes, animations = _extract_rag_hints("history of the roman empire")
+        assert classes == []
+        assert animations == []
+
+    def test_hints_deduplicated(self):
+        from src.agent.nodes import _extract_rag_hints
+
+        classes, _ = _extract_rag_hints("graph graph axes plot")
+        assert classes.count("Axes") == 1
+
+
+class TestTruncateCodeExample:
+    def test_short_code_untouched(self):
+        from src.agent.nodes import _truncate_code_example
+
+        code = "line1\nline2"
+        assert _truncate_code_example(code) == code
+
+    def test_long_code_cut_at_line_boundary_with_marker(self):
+        from src.agent.nodes import _truncate_code_example
+
+        code = "\n".join(f"line_{i} = {i}" for i in range(500))
+        result = _truncate_code_example(code, limit=100)
+        assert result.endswith("# ... truncated")
+        body = result.rsplit("\n", 1)[0]
+        assert len(body) <= 100
+        assert all(line in code for line in body.split("\n"))
