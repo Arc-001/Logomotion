@@ -217,6 +217,7 @@ def video_code_gen_node(state: VideoGenState) -> dict:
     """
     from ..graph_rag.retriever import ManimRetriever  # deferred: pulls in DB drivers
 
+    warnings: list[str] = []
     retriever = ManimRetriever()
 
     try:
@@ -242,6 +243,7 @@ Used animations: {', '.join(result.used_animations)}
     except Exception as e:
         example_ids = []
         retrieved_context = f"RAG retrieval failed: {e}"
+        warnings.append(f"RAG retrieval failed, generating without examples: {e}")
     finally:
         retriever.close()
 
@@ -436,8 +438,10 @@ transcript = {{
         if transcript_match:
             try:
                 transcript = ast.literal_eval(transcript_match.group(1))
-            except (SyntaxError, ValueError, NameError):
-                pass
+            except (SyntaxError, ValueError, NameError) as e:
+                warnings.append(f"Transcript could not be parsed, video will have no narration: {e}")
+        else:
+            warnings.append("LLM response contained no transcript block, video will have no narration")
 
         scene_match = re.search(r'class\s+(\w+)\s*\([^)]*Scene[^)]*\)', code)
         scene_class_name = scene_match.group(1) if scene_match else "GeneratedScene"
@@ -453,6 +457,7 @@ class GeneratedScene(Scene):
 '''
         transcript = {0: f"Welcome to {state['scene_title']}"}
         scene_class_name = "GeneratedScene"
+        warnings.append("LLM was unavailable, generated a placeholder title scene instead")
 
     return {
         "code": code,
@@ -460,6 +465,7 @@ class GeneratedScene(Scene):
         "transcript": transcript,
         "retrieved_examples": example_ids,
         "retrieved_context": retrieved_context,
+        "pipeline_warnings": warnings,
         "messages": [{"role": "assistant", "content": f"Generated code for {state['scene_title']}"}],
     }
 
@@ -663,11 +669,16 @@ def render_checker_node(state: VideoGenState) -> dict:
 
     if not video_path or not Path(video_path).exists():
         print("[RENDER CHECK] Video file does not exist!")
+        warnings = []
+        render_error = state.get("error")
+        if render_error:
+            warnings.append(f"Render failed after all retries: {str(render_error)[:300]}")
         return {
             "video_valid": False,
             "validation_errors": ["Video file does not exist"],
             "checked_video_path": None,
             "actual_duration": None,
+            "pipeline_warnings": warnings,
         }
 
     file_size = Path(video_path).stat().st_size
@@ -700,11 +711,18 @@ def render_checker_node(state: VideoGenState) -> dict:
 
     print(f"[RENDER CHECK] Validation {'passed' if checked_path else 'failed'}: {errors}")
 
+    warnings = list(non_duration_errors)
+    if state.get("duration_mode", "guide") == "guide":
+        # In guide mode nothing downstream corrects the duration, so at least
+        # tell the user how far off the video came out.
+        warnings.extend(e for e in errors if "Duration mismatch" in e)
+
     return {
         "video_valid": video_valid,
         "validation_errors": errors,
         "checked_video_path": checked_path,
         "actual_duration": actual_duration,
+        "pipeline_warnings": warnings,
     }
 
 

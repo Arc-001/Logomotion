@@ -67,6 +67,12 @@ def cmd_generate(args):
         if result.get("error"):
             print(f"Error: {result['error']}")
 
+    warnings = result.get("pipeline_warnings")
+    if warnings:
+        print("\nWarnings:")
+        for warning in warnings:
+            print(f"  - {warning}")
+
     if args.output and result.get("code"):
         output_dir = Path(args.output)
         output_dir.mkdir(parents=True, exist_ok=True)

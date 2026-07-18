@@ -95,7 +95,9 @@ class VideoGenState(TypedDict):
     duration_factor: Optional[float]  # Factor applied to adjust duration
     
     final_output_path: Optional[str]
-    
+
+    pipeline_warnings: Annotated[list[str], add]  # Non-fatal issues surfaced to the user
+
     messages: Annotated[list[dict], add]  # Chat history for debugging
 
 
@@ -217,6 +219,8 @@ def create_initial_state(
         duration_factor=None,
         
         final_output_path=None,
-        
+
+        pipeline_warnings=[],
+
         messages=[],
     )
