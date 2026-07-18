@@ -120,6 +120,8 @@ The server binds to `http://0.0.0.0:8000` by default.
 
 This starts the application container and a Neo4j instance via Docker Compose. The API is available at `http://localhost:8000` and the Neo4j browser at `http://localhost:7474`.
 
+On first start, a one-shot `neo4j-seed` service loads the pre-indexed knowledge base from `neo4j-dumps/neo4j.dump` (~1200 Manim examples with concept/class/animation graph links), so no manual `index` run is needed. Seeding is skipped whenever the data volume already contains data; delete the `neo4j_data` volume to re-seed from the dump.
+
 ## REST API
 
 ### POST /generate

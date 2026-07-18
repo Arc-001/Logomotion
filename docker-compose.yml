@@ -32,6 +32,34 @@ services:
     networks:
       - manim-network
 
+  # One-shot seeder: loads the pre-indexed knowledge base from
+  # neo4j-dumps/neo4j.dump into the data volume on first start only
+  # (guarded by a marker file so existing data is never overwritten).
+  neo4j-seed:
+    image: neo4j:5-community
+    container_name: manim-neo4j-seed
+    volumes:
+      - neo4j_data:/data
+      # ro + z: read-only with SELinux relabel (needed on Fedora/RHEL hosts,
+      # harmless elsewhere)
+      - ./neo4j-dumps:/dumps:ro,z
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        if [ -f /data/.seeded ]; then
+          echo "Neo4j data already seeded, skipping dump load"
+          exit 0
+        fi
+        if [ ! -f /dumps/neo4j.dump ]; then
+          echo "No dump found at /dumps/neo4j.dump, starting empty"
+          exit 0
+        fi
+        neo4j-admin database load neo4j --from-path=/dumps --overwrite-destination=true
+        touch /data/.seeded
+        echo "Seeded Neo4j from dump"
+    networks:
+      - manim-network
+
   # Neo4j Graph Database
   neo4j:
     image: neo4j:5-community
@@ -46,6 +74,9 @@ services:
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
+    depends_on:
+      neo4j-seed:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1"]
       interval: 10s
