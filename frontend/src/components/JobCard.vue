@@ -26,6 +26,12 @@
 
     <div v-if="job.error" class="job-error">{{ job.error }}</div>
 
+    <ul v-if="job.warnings && job.warnings.length" class="job-warnings">
+      <li v-for="(warning, i) in job.warnings" :key="i" class="job-warning">
+        {{ warning }}
+      </li>
+    </ul>
+
     <div v-if="showCode && job.code" class="code-block">{{ job.code }}</div>
 
     <!-- Web research sources (shown when web_search was used) -->
@@ -120,6 +126,24 @@ const jobDownloadUrl = computed(() => downloadUrl(props.job.job_id))
   padding: 8px 12px;
   border-radius: var(--radius-sm);
   margin-top: 10px;
+  line-height: 1.5;
+}
+
+.job-warnings {
+  list-style: none;
+  margin: 10px 0 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.job-warning {
+  font-size: 12px;
+  color: var(--warning);
+  background: var(--warning-bg);
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
   line-height: 1.5;
 }
 

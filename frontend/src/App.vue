@@ -63,6 +63,8 @@ function startPolling(job) {
       job.video_path = data.video_path
       job.code = data.code
       job.error = data.error
+      job.warnings = data.warnings
+      job.web_sources = data.web_sources
 
       if (data.status === 'completed' || data.status === 'failed') {
         clearInterval(pollingIntervals[job.job_id])

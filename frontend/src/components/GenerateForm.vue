@@ -57,27 +57,57 @@
             <option value="strict">Strict (exact)</option>
           </select>
         </div>
+        <div class="form-group">
+          <label for="gen-quality">Quality</label>
+          <select id="gen-quality" v-model="form.quality">
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+          </select>
+        </div>
       </div>
 
       <!-- Web Search Toggle -->
-      <div class="web-search-row">
-        <label class="toggle-label" :class="{ active: form.web_search }">
-          <div class="toggle-track" @click="form.web_search = !form.web_search">
-            <div class="toggle-thumb" :class="{ on: form.web_search }"></div>
-          </div>
-          <div class="toggle-text">
-            <span class="toggle-title">
-              <svg v-if="form.web_search" class="icon-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
-                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
-              </svg>
-              Live Web Research
-            </span>
-            <span class="toggle-desc">
-              LLM-crafted queries · DuckDuckGo + Wikipedia · Top-5 scraping · Grounded animation
-            </span>
-          </div>
-        </label>
+      <div class="toggle-rows">
+        <div class="web-search-row">
+          <label class="toggle-label" :class="{ active: form.web_search }">
+            <div class="toggle-track" @click="form.web_search = !form.web_search">
+              <div class="toggle-thumb" :class="{ on: form.web_search }"></div>
+            </div>
+            <div class="toggle-text">
+              <span class="toggle-title">
+                <svg v-if="form.web_search" class="icon-globe" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
+                  <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                </svg>
+                Live Web Research
+              </span>
+              <span class="toggle-desc">
+                LLM-crafted queries · DuckDuckGo + Wikipedia · Top-5 scraping · Grounded animation
+              </span>
+            </div>
+          </label>
+        </div>
+
+        <!-- Visual QA Toggle -->
+        <div class="visual-qa-row">
+          <label class="toggle-label" :class="{ active: form.visual_qa }">
+            <div class="toggle-track" @click="form.visual_qa = !form.visual_qa">
+              <div class="toggle-thumb" :class="{ on: form.visual_qa }"></div>
+            </div>
+            <div class="toggle-text">
+              <span class="toggle-title">
+                <svg v-if="form.visual_qa" class="icon-eye" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+                </svg>
+                Visual QA Pass
+              </span>
+              <span class="toggle-desc">
+                Multimodal frame review · layout auto-fix · re-render
+              </span>
+            </div>
+          </label>
+        </div>
       </div>
 
       <div v-if="error" class="form-error">{{ error }}</div>
@@ -104,7 +134,9 @@ const form = reactive({
   depth: 'detailed',
   orientation: 'landscape',
   duration_mode: 'guide',
+  quality: 'medium',
   web_search: false,
+  visual_qa: false,
 })
 const submitting = ref(false)
 const error = ref('')
@@ -123,7 +155,9 @@ async function submit() {
         depth: form.depth,
         orientation: form.orientation,
         duration_mode: form.duration_mode,
+        quality: form.quality,
         web_search: form.web_search,
+        visual_qa: form.visual_qa,
       }),
     })
     emit('submitted', data)
@@ -185,7 +219,7 @@ async function submit() {
 
 .form-row {
   display: grid;
-  grid-template-columns: 1fr 1fr 1fr 1fr;
+  grid-template-columns: 1fr 1fr 1fr 1fr 1fr;
   gap: 16px;
 }
 
@@ -248,9 +282,17 @@ async function submit() {
   margin-top: 8px;
 }
 
-/* Web-search toggle */
-.web-search-row {
+/* Toggle rows */
+.toggle-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   margin-top: 4px;
+}
+
+.web-search-row,
+.visual-qa-row {
+  margin-top: 0;
 }
 
 .toggle-label {
@@ -321,7 +363,8 @@ async function submit() {
   color: var(--accent);
 }
 
-.icon-globe {
+.icon-globe,
+.icon-eye {
   width: 14px;
   height: 14px;
   flex-shrink: 0;
