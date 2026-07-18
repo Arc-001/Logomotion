@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Literal, Optional
@@ -52,27 +53,43 @@ def get_llm_client() -> Optional["OpenAI"]:
 
 
 def llm_chat(messages: list[dict], temperature: float = 0.2) -> Optional[str]:
-    """Call OpenRouter LLM with messages."""
+    """Call OpenRouter LLM with messages.
+
+    Message ``content`` is passed through unchanged, so multimodal
+    list-of-parts content (text + image_url) works as well as plain strings.
+
+    Retries transient failures (exceptions or empty responses) with
+    exponential backoff before giving up and returning None.
+    """
     client = get_llm_client()
     if not client:
         return None
 
     settings = get_settings()
+    attempts = max(1, settings.llm_retries)
 
-    try:
-        completion = client.chat.completions.create(
-            extra_headers={
-                "HTTP-Referer": "https://manim-agent.local",
-                "X-Title": "Manim Graph RAG Agent",
-            },
-            model=settings.openrouter_model,
-            messages=messages,
-            temperature=temperature,
-        )
-        return completion.choices[0].message.content
-    except Exception as e:
-        print(f"LLM call failed: {e}")
-        return None
+    for attempt in range(attempts):
+        try:
+            completion = client.chat.completions.create(
+                extra_headers={
+                    "HTTP-Referer": "https://manim-agent.local",
+                    "X-Title": "Manim Graph RAG Agent",
+                },
+                model=settings.openrouter_model,
+                messages=messages,
+                temperature=temperature,
+            )
+            content = completion.choices[0].message.content
+            if content:
+                return content
+            print(f"LLM call returned empty response (attempt {attempt + 1}/{attempts})")
+        except Exception as e:
+            print(f"LLM call failed (attempt {attempt + 1}/{attempts}): {e}")
+
+        if attempt < attempts - 1:
+            time.sleep(2 ** attempt)
+
+    return None
 
 
 # ============================================================================

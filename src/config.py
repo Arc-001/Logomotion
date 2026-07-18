@@ -35,6 +35,9 @@ class Settings:
     max_retries: int = 3
     render_timeout: int = 120
 
+    # LLM call retries (transport-level, with exponential backoff)
+    llm_retries: int = 3
+
     # Video generation defaults
     video_length: float = 1.0
     explanation_depth: str = "detailed"
@@ -55,6 +58,7 @@ def get_settings() -> Settings:
         chroma_persist_dir=os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db"),
         max_retries=int(os.getenv("MAX_RETRIES", "3")),
         render_timeout=int(os.getenv("RENDER_TIMEOUT", "120")),
+        llm_retries=int(os.getenv("LLM_RETRIES", "3")),
         video_length=float(os.getenv("VIDEO_LENGTH", "1.0")),
         explanation_depth=os.getenv("EXPLANATION_DEPTH", "detailed"),
         video_orientation=os.getenv("VIDEO_ORIENTATION", "landscape"),
