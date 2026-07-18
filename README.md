@@ -25,13 +25,16 @@
 
 ## What it does
 
-```
-"Explain the concept of binary search"
-        │
-        ▼
-  a storyboard ── Manim code ── a rendered scene ── a frame-by-frame
-  visual review ── a locally synthesized voiceover ── one final .mp4
-```
+You give it *"Explain the concept of binary search"*. It hands back a rendered, narrated video — storyboarded, code-generated, visually reviewed, and voiced without a single audio API call.
+
+<div align="center">
+
+![Pipeline](https://img.shields.io/badge/pipeline-9%20stages-informational?style=flat-square)
+![Knowledge base](https://img.shields.io/badge/knowledge%20base-~1200%20examples-informational?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-92%20passing-success?style=flat-square)
+![Audio bill](https://img.shields.io/badge/audio%20bill-%240.00-success?style=flat-square)
+
+</div>
 
 Logomotion is not a single LLM call wearing a trench coat. It is a self-correcting **LangGraph state machine** that:
 
@@ -281,3 +284,15 @@ cd frontend && npm run build && cp -r dist/* ../src/static/
 ## License
 
 [MIT](LICENSE) — go make something move.
+
+---
+
+<div align="center">
+
+**[Architecture](#architecture)** · **[Quickstart](#quickstart)** · **[Usage](#usage)** · **[Configuration](#configuration)** · **[Development](#development)**
+
+<sub>Prompt in, motion picture out. If it drew a triangle where you asked for a proof, open an issue.</sub>
+
+<a href="#logomotion">Back to top</a>
+
+</div>
