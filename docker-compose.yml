@@ -2,8 +2,6 @@
 # Manim Graph RAG Agent - Docker Compose
 # ============================================================================
 
-version: '3.8'
-
 services:
   # Main application
   app:

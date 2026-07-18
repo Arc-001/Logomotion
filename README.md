@@ -89,16 +89,28 @@ flowchart TD
 ```bash
 git clone https://github.com/Arc-001/Logomotion.git
 cd Logomotion
-./install.sh
-cp .env.example .env   # add your OpenRouter API key
-./start.sh generate "Explain the concept of binary search"
+./start.sh install     # venv + deps + .env template
+# edit .env: add your OpenRouter API key
+./start.sh start       # Neo4j up (auto-seeded) + API server
 ```
 
 Or skip straight to containers:
 
 ```bash
-./start.sh --docker
+./start.sh install --docker
+./start.sh start --docker
 ```
+
+One script drives the entire lifecycle:
+
+| Command | What it does |
+|---|---|
+| `./start.sh install [--docker]` | Install deps (venv + pip, or build Docker images) |
+| `./start.sh start [--docker]` | Start Neo4j (auto-seeded) and the API server |
+| `./start.sh stop` | Stop all containers (data volumes preserved) |
+| `./start.sh seed [--force]` | Load the bundled Neo4j dump; `--force` wipes and re-seeds |
+| `./start.sh generate "prompt"` | Generate a video |
+| `./start.sh serve` / `index` / `test` / `logs` / `status` | The rest of the toolbox |
 
 > [!NOTE]
 > The Docker setup ships **pre-seeded**: on first start, a one-shot `neo4j-seed` service loads `neo4j-dumps/neo4j.dump` (about 1200 Manim examples with concept, class, and animation graph links) into the database. No manual indexing required. Delete the `neo4j_data` volume to re-seed.
@@ -269,7 +281,7 @@ Logomotion/
 ## Development
 
 ```bash
-venv/bin/python -m pytest tests/        # 92 tests, no DBs, no network, no API key
+./start.sh test        # 92 tests, no DBs, no network, no API key
 ```
 
 The frontend is Vue 3 + Vite. `npm run dev` proxies API calls to a local server; production builds are committed to `src/static/`:
