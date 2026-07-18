@@ -61,6 +61,7 @@ class Settings:
     explanation_depth: str = "detailed"
     video_orientation: str = "landscape"
     duration_mode: str = "guide"  # "guide" = soft hint, "strict" = ffmpeg speed adjust
+    storyboard_enabled: bool = True  # plan timed sections before writing code
 
 
 @lru_cache(maxsize=1)
@@ -83,4 +84,6 @@ def get_settings() -> Settings:
         explanation_depth=os.getenv("EXPLANATION_DEPTH", "detailed"),
         video_orientation=os.getenv("VIDEO_ORIENTATION", "landscape"),
         duration_mode=os.getenv("DURATION_MODE", "guide"),
+        storyboard_enabled=os.getenv("STORYBOARD_ENABLED", "true").strip().lower()
+        in ("1", "true", "yes", "on"),
     )

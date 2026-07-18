@@ -488,3 +488,121 @@ class TestTruncateCodeExample:
         body = result.rsplit("\n", 1)[0]
         assert len(body) <= 100
         assert all(line in code for line in body.split("\n"))
+
+
+# ============================================================================
+# storyboard_node
+# ============================================================================
+
+class TestStoryboardNode:
+    def _state(self):
+        return {
+            "scene_title": "Binary Search",
+            "scene_prompt_description": "Explain binary search",
+            "scene_length": 0.5,  # 30 seconds
+            "explanation_depth": "detailed",
+        }
+
+    def test_parses_valid_storyboard(self, monkeypatch):
+        from src.agent.nodes import storyboard_node
+
+        response = (
+            '{"sections": ['
+            '{"title": "Intro", "duration_seconds": 10, "visuals": "title card", "narration": "welcome"},'
+            '{"title": "Steps", "duration_seconds": 15, "visuals": "array", "narration": "we halve"},'
+            '{"title": "Wrap", "duration_seconds": 5, "visuals": "summary", "narration": "done"}'
+            "]}"
+        )
+        monkeypatch.setattr(
+            "src.agent.nodes.llm_chat", lambda messages, temperature=0.4: response
+        )
+
+        result = storyboard_node(self._state())
+
+        assert result["storyboard"] is not None
+        assert len(result["storyboard"]) == 3
+        assert result["storyboard"][0]["title"] == "Intro"
+        assert sum(s["duration_seconds"] for s in result["storyboard"]) == pytest.approx(30, abs=1)
+
+    def test_rescales_durations_to_target(self, monkeypatch):
+        from src.agent.nodes import storyboard_node
+
+        response = (
+            '{"sections": ['
+            '{"title": "A", "duration_seconds": 30, "visuals": "v", "narration": "n"},'
+            '{"title": "B", "duration_seconds": 30, "visuals": "v", "narration": "n"}'
+            "]}"
+        )
+        monkeypatch.setattr(
+            "src.agent.nodes.llm_chat", lambda messages, temperature=0.4: response
+        )
+
+        result = storyboard_node(self._state())  # target 30s, plan sums to 60s
+
+        total = sum(s["duration_seconds"] for s in result["storyboard"])
+        assert total == pytest.approx(30, abs=1)
+
+    def test_json_in_markdown_fences(self, monkeypatch):
+        from src.agent.nodes import storyboard_node
+
+        response = (
+            "Here is the plan:\n```json\n"
+            '{"sections": [{"title": "A", "duration_seconds": 30, "visuals": "v", "narration": "n"}]}'
+            "\n```"
+        )
+        monkeypatch.setattr(
+            "src.agent.nodes.llm_chat", lambda messages, temperature=0.4: response
+        )
+
+        result = storyboard_node(self._state())
+        assert result["storyboard"] is not None
+
+    def test_malformed_json_falls_back_with_warning(self, monkeypatch):
+        from src.agent.nodes import storyboard_node
+
+        monkeypatch.setattr(
+            "src.agent.nodes.llm_chat", lambda messages, temperature=0.4: "not json at all"
+        )
+
+        result = storyboard_node(self._state())
+
+        assert result["storyboard"] is None
+        assert any("unusable" in w for w in result["pipeline_warnings"])
+
+    def test_llm_unavailable_falls_back_with_warning(self, monkeypatch):
+        from src.agent.nodes import storyboard_node
+
+        monkeypatch.setattr(
+            "src.agent.nodes.llm_chat", lambda messages, temperature=0.4: None
+        )
+
+        result = storyboard_node(self._state())
+
+        assert result["storyboard"] is None
+        assert any("LLM unavailable" in w for w in result["pipeline_warnings"])
+
+
+class TestStoryboardPromptInjection:
+    def test_storyboard_block_reaches_code_gen_prompt(self, monkeypatch):
+        from src.agent import nodes
+
+        captured = {}
+
+        def fake_llm(messages, temperature=0.2):
+            captured["prompt"] = messages[1]["content"]
+            return None  # fall back to stub scene; we only care about the prompt
+
+        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr(nodes, "llm_chat", fake_llm)
+
+        state = _base_state()
+        state["storyboard"] = [
+            {"title": "Intro", "duration_seconds": 10, "visuals": "title card", "narration": "welcome"},
+            {"title": "Wrap", "duration_seconds": 20, "visuals": "summary", "narration": "bye"},
+        ]
+        nodes.video_code_gen_node(state)
+
+        prompt = captured["prompt"]
+        assert "STORYBOARD" in prompt
+        assert "[0s–10s] Intro" in prompt
+        assert "[10s–30s] Wrap" in prompt
