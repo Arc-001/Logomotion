@@ -15,6 +15,7 @@ from .nodes import (
     synchronizer_node,
     audio_video_merger_node,
     web_research_node,
+    storyboard_node,
     should_retry_or_continue,
     should_fix_duration,
 )
@@ -57,6 +58,7 @@ def build_video_gen_graph() -> StateGraph:
 
     # Register all nodes
     builder.add_node("web_research", web_research_node)
+    builder.add_node("storyboard", storyboard_node)
     builder.add_node("video_code_gen", video_code_gen_node)
     builder.add_node("code_executor", code_executor_node)
     builder.add_node("recorrector", recorrector_node)
@@ -66,20 +68,37 @@ def build_video_gen_graph() -> StateGraph:
     builder.add_node("synchronizer", synchronizer_node)
     builder.add_node("audio_video_merger", audio_video_merger_node)
 
-    # Conditional entry: run web research first when toggle is on
+    # Conditional entry: web research first when enabled, then storyboard
+    # planning when enabled, then code generation.
     def _entry_router(state: VideoGenState) -> str:
-        return "web_research" if state.get("web_search_enabled") else "video_code_gen"
+        if state.get("web_search_enabled"):
+            return "web_research"
+        if state.get("storyboard_enabled"):
+            return "storyboard"
+        return "video_code_gen"
 
     builder.set_conditional_entry_point(
         _entry_router,
         {
             "web_research": "web_research",
+            "storyboard": "storyboard",
             "video_code_gen": "video_code_gen",
         },
     )
 
-    # web_research always feeds directly into code gen
-    builder.add_edge("web_research", "video_code_gen")
+    def _after_web_research(state: VideoGenState) -> str:
+        return "storyboard" if state.get("storyboard_enabled") else "video_code_gen"
+
+    builder.add_conditional_edges(
+        "web_research",
+        _after_web_research,
+        {
+            "storyboard": "storyboard",
+            "video_code_gen": "video_code_gen",
+        },
+    )
+
+    builder.add_edge("storyboard", "video_code_gen")
 
     # After code generation, run both executor and transcript processor in parallel
     builder.add_edge("video_code_gen", "code_executor")

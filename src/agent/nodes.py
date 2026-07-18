@@ -14,6 +14,7 @@ Implements the following nodes from the architecture diagram:
 
 import ast
 import asyncio
+import json
 import re
 import shutil
 import subprocess
@@ -283,6 +284,113 @@ def web_research_node(state: VideoGenState) -> dict:
 
 
 # ============================================================================
+# NODE 0b: Storyboard Planner (optional — plans timed sections before code)
+# ============================================================================
+
+def _parse_storyboard_response(response_text: str, target_seconds: int) -> Optional[list[dict]]:
+    """Extract and validate the storyboard JSON from an LLM response."""
+    fence_match = re.search(r"```(?:json)?\s*\n(.*?)```", response_text, re.DOTALL)
+    raw = fence_match.group(1) if fence_match else response_text
+
+    data = json.loads(raw)
+    sections = data.get("sections") if isinstance(data, dict) else None
+    if not isinstance(sections, list) or not sections:
+        return None
+
+    parsed = []
+    for section in sections:
+        if not isinstance(section, dict):
+            return None
+        duration = float(section.get("duration_seconds", 0))
+        if duration <= 0:
+            return None
+        parsed.append({
+            "title": str(section.get("title", "")),
+            "duration_seconds": duration,
+            "visuals": str(section.get("visuals", "")),
+            "narration": str(section.get("narration", "")),
+        })
+
+    # Rescale so section durations sum exactly to the target
+    total = sum(s["duration_seconds"] for s in parsed)
+    if total > 0 and abs(total - target_seconds) > 1:
+        scale = target_seconds / total
+        for s in parsed:
+            s["duration_seconds"] = round(s["duration_seconds"] * scale, 1)
+
+    return parsed
+
+
+def storyboard_node(state: VideoGenState) -> dict:
+    """
+    Plan the video as timed sections before any code is written.
+
+    Produces a storyboard the code generator must implement, giving it a
+    pacing and layout skeleton instead of improvising structure, duration,
+    and narration in one shot.
+
+    Input: scene_title, scene_prompt_description, scene_length, web_context
+    Output: storyboard (list of sections) or None on failure
+    """
+    target_seconds = int(state["scene_length"] * 60)
+    depth = state.get("explanation_depth", "detailed")
+    depth_config = DEPTH_CONFIGS.get(depth, DEPTH_CONFIGS["detailed"])
+
+    print(f"[STORYBOARD] Planning {target_seconds}s video for: {state['scene_title']!r}")
+
+    web_context = state.get("web_context", "")
+    web_block = ""
+    if web_context and not web_context.startswith("[Web research"):
+        web_block = f"\nUse this up-to-date research where relevant:\n{web_context}\n"
+
+    prompt = f"""Plan an educational Manim animation before any code is written.
+
+Topic: {state["scene_prompt_description"]}
+Title: {state["scene_title"]}
+Target duration: {target_seconds} seconds
+Detail level: {depth_config["detail_level"]}
+{web_block}
+Break the video into 3 to 8 sections. Respond with STRICT JSON only — no prose, no markdown fences:
+
+{{"sections": [{{"title": "...", "duration_seconds": 10, "visuals": "...", "narration": "..."}}]}}
+
+Rules:
+- duration_seconds across all sections MUST sum to exactly {target_seconds}
+- visuals: what appears on screen and how it is laid out — one clear focus per section
+- narration: one or two sentences of what the voiceover says during the section
+- The first section introduces the topic; the last one concludes it"""
+
+    response_text = llm_chat(
+        [{"role": "user", "content": prompt}],
+        temperature=0.4,
+    )
+
+    if not response_text:
+        print("[STORYBOARD] LLM unavailable — continuing without a storyboard")
+        return {
+            "storyboard": None,
+            "pipeline_warnings": ["Storyboard planning failed (LLM unavailable), generated single-shot"],
+        }
+
+    try:
+        storyboard = _parse_storyboard_response(response_text, target_seconds)
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
+        print(f"[STORYBOARD] Could not parse storyboard: {e}")
+        storyboard = None
+
+    if not storyboard:
+        return {
+            "storyboard": None,
+            "pipeline_warnings": ["Storyboard planning produced unusable output, generated single-shot"],
+        }
+
+    for i, section in enumerate(storyboard):
+        print(f"[STORYBOARD]   {i + 1}. {section['title']} ({section['duration_seconds']}s)")
+
+    return {"storyboard": storyboard}
+
+
+# ============================================================================
 # NODE 1: Video Code Generator (with Graph RAG)
 # ============================================================================
 
@@ -379,6 +487,30 @@ accurate, current, and informative:
     else:
         web_section = ""
 
+    # Inject the storyboard plan when the planning stage produced one
+    storyboard = state.get("storyboard")
+    if storyboard:
+        lines = []
+        cursor = 0.0
+        for i, section in enumerate(storyboard):
+            start = cursor
+            cursor += section["duration_seconds"]
+            lines.append(
+                f"{i + 1}. [{start:.0f}s–{cursor:.0f}s] {section['title']}\n"
+                f"   Visuals: {section['visuals']}\n"
+                f"   Narration: {section['narration']}"
+            )
+        storyboard_section = f"""
+## STORYBOARD (IMPLEMENT EXACTLY THESE SECTIONS AND DURATIONS)
+{chr(10).join(lines)}
+
+- Each section's animations plus self.wait() calls must fill its allotted time window.
+- Apply the CLEAR DESK rule between sections.
+- Transcript timestamps MUST align with the section start times above.
+"""
+    else:
+        storyboard_section = ""
+
     prompt = f"""Create a Manim animation based on this request:
 
 **Title:** {state["scene_title"]}
@@ -386,7 +518,7 @@ accurate, current, and informative:
 **Target Duration:** {target_seconds} seconds ({state["scene_length"]} minutes)
 **Explanation Level:** {depth} - {depth_config["detail_level"]}
 **Orientation:** {orientation} ({frame_width} × {frame_height})
-{web_section}
+{web_section}{storyboard_section}
 ## CRITICAL REQUIREMENTS (MUST FOLLOW STRICTLY):
 
 ### 1. SCREEN BOUNDS — NEVER GO OUT OF FRAME

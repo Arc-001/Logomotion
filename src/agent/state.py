@@ -64,6 +64,10 @@ class VideoGenState(TypedDict):
     web_context: str                  # Formatted research brief injected into code-gen prompt
     web_sources: list[dict]           # Serialised WebSource list for job metadata
 
+    # Storyboard planning (plan timed sections before writing code)
+    storyboard_enabled: bool
+    storyboard: Optional[list[dict]]  # [{title, duration_seconds, visuals, narration}]
+
     retrieved_examples: list[str]  # Code examples from Graph RAG
     retrieved_context: str  # Formatted context for LLM
     
@@ -115,6 +119,7 @@ def create_initial_state(
     max_retries: Optional[int] = None,
     render_quality: Optional[str] = None,
     render_fps: Optional[int] = None,
+    storyboard_enabled: Optional[bool] = None,
 ) -> VideoGenState:
     """Create initial state for the workflow."""
     settings = get_settings()
@@ -124,6 +129,8 @@ def create_initial_state(
         render_quality = settings.render_quality
     if render_fps is None:
         render_fps = settings.render_fps
+    if storyboard_enabled is None:
+        storyboard_enabled = settings.storyboard_enabled
     
     if orientation == "portrait":
         frame_desc = "8 units wide (-4 to +4) and 14.2 units tall (-7.1 to +7.1)"
@@ -196,6 +203,9 @@ def create_initial_state(
         web_search_enabled=web_search_enabled,
         web_context="",
         web_sources=[],
+
+        storyboard_enabled=storyboard_enabled,
+        storyboard=None,
 
         retrieved_examples=[],
         retrieved_context="",
