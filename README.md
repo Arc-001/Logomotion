@@ -52,22 +52,22 @@ flowchart TD
     E -- on --> WR[web_research]
     E -- off --> SB
     WR --> SB{storyboard?}
-    SB -- on --> ST[storyboard\nplan timed sections]
+    SB -- on --> ST["storyboard<br/>plan timed sections"]
     SB -- off --> CG
-    ST --> CG[video_code_gen\nGraph RAG + LLM]
+    ST --> CG["video_code_gen<br/>Graph RAG + LLM"]
 
-    CG --> CE[code_executor\nvalidate + manim render]
-    CG --> TP[transcript_processor\nKokoro TTS]
+    CG --> CE["code_executor<br/>validate + manim render"]
+    CG --> TP["transcript_processor<br/>Kokoro TTS"]
 
-    CE -- render error --> RC[recorrector\nLLM fix] --> CE
-    CE -- ok + visual QA --> VQ[visual_qa\nmultimodal frame review]
-    VQ -- layout issues --> VR[visual_recorrector\nlayout-only fix] --> CE
+    CE -- render error --> RC["recorrector<br/>LLM fix"] --> CE
+    CE -- ok + visual QA --> VQ["visual_qa<br/>multimodal frame review"]
+    VQ -- layout issues --> VR["visual_recorrector<br/>layout-only fix"] --> CE
     VQ -- acceptable --> RCH
     CE -- ok --> RCH[render_checker]
 
     RCH --> B[[barrier join]]
     TP --> B
-    B --> SY[synchronizer] --> M[audio_video_merger\nffmpeg] --> OUT([output_id.mp4])
+    B --> SY[synchronizer] --> M["audio_video_merger<br/>ffmpeg"] --> OUT([output_id.mp4])
 ```
 
 | Stage | Role |
