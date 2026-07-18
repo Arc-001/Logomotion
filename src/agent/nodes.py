@@ -32,6 +32,7 @@ except ImportError:
 
 from .state import VideoGenState, TranscriptSection
 from ..config import get_settings
+from ..graph_rag.schema import KNOWN_MANIM_CLASSES, KNOWN_ANIMATIONS
 from ..manim_runner.executor import ManimExecutor
 from ..manim_runner.validator import VideoValidator, get_video_duration
 
@@ -118,6 +119,83 @@ def _extract_code_block(text: str) -> str:
         return generic_match.group(1).strip()
 
     return text.strip()
+
+
+# ============================================================================
+# RAG hint extraction — activates the graph branch of hybrid_search
+# ============================================================================
+
+_KNOWN_CLASS_NAMES = [c.name for c in KNOWN_MANIM_CLASSES]
+_KNOWN_ANIMATION_NAMES = [a.name for a in KNOWN_ANIMATIONS]
+
+_CLASS_KEYWORD_HINTS = {
+    "graph": ["Axes", "NumberPlane"],
+    "plot": ["Axes", "ParametricFunction"],
+    "axis": ["Axes"],
+    "axes": ["Axes"],
+    "grid": ["NumberPlane"],
+    "function": ["Axes", "ParametricFunction"],
+    "curve": ["ParametricFunction", "Axes"],
+    "equation": ["MathTex"],
+    "formula": ["MathTex"],
+    "theorem": ["MathTex"],
+    "vector": ["Vector", "Arrow"],
+    "arrow": ["Arrow"],
+    "circle": ["Circle"],
+    "square": ["Square"],
+    "rectangle": ["Rectangle"],
+    "line": ["Line"],
+    "point": ["Dot"],
+    "3d": ["ThreeDScene", "ThreeDAxes"],
+    "sphere": ["Sphere", "ThreeDScene"],
+    "surface": ["ParametricSurface", "ThreeDScene"],
+    "complex": ["ComplexPlane"],
+    "label": ["Text"],
+}
+
+_ANIMATION_KEYWORD_HINTS = {
+    "fade": ["FadeIn", "FadeOut"],
+    "transform": ["Transform"],
+    "morph": ["Transform"],
+    "rotate": ["Rotate"],
+    "rotation": ["Rotate"],
+    "grow": ["GrowFromCenter"],
+    "highlight": ["Indicate"],
+    "emphasize": ["Indicate"],
+    "draw": ["Create", "Write"],
+}
+
+
+def _extract_rag_hints(text: str) -> tuple[list[str], list[str]]:
+    """Mine likely Manim class and animation names from the request text.
+
+    Deterministic token matching (no LLM call): known names appearing in
+    the text plus a small topic-keyword map. The hints feed the graph
+    branch of hybrid_search, which is inactive without them.
+    """
+    tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+
+    class_hints = [name for name in _KNOWN_CLASS_NAMES if name.lower() in tokens]
+    animation_hints = [name for name in _KNOWN_ANIMATION_NAMES if name.lower() in tokens]
+
+    for keyword, hints in _CLASS_KEYWORD_HINTS.items():
+        if keyword in tokens:
+            class_hints.extend(h for h in hints if h not in class_hints)
+    for keyword, hints in _ANIMATION_KEYWORD_HINTS.items():
+        if keyword in tokens:
+            animation_hints.extend(h for h in hints if h not in animation_hints)
+
+    return class_hints, animation_hints
+
+
+def _truncate_code_example(code: str, limit: int = 3000) -> str:
+    """Cut a code example at a line boundary with an explicit marker."""
+    if len(code) <= limit:
+        return code
+    cut = code.rfind("\n", 0, limit)
+    if cut <= 0:
+        cut = limit
+    return code[:cut] + "\n# ... truncated"
 
 
 # ============================================================================
@@ -220,10 +298,18 @@ def video_code_gen_node(state: VideoGenState) -> dict:
     warnings: list[str] = []
     retriever = ManimRetriever()
 
+    class_hints, animation_hints = _extract_rag_hints(
+        f"{state['scene_title']} {state['scene_prompt_description']}"
+    )
+    if class_hints or animation_hints:
+        print(f"[CODE GEN] RAG hints — classes: {class_hints}, animations: {animation_hints}")
+
     try:
         results = retriever.hybrid_search(
             query=state["scene_prompt_description"],
-            limit=3,
+            class_hints=class_hints or None,
+            animation_hints=animation_hints or None,
+            limit=4,
         )
 
         context_parts = []
@@ -233,7 +319,7 @@ def video_code_gen_node(state: VideoGenState) -> dict:
             context_parts.append(f"""
 ### Example: {result.prompt[:100]}...
 ```python
-{result.code[:1500]}...
+{_truncate_code_example(result.code)}
 ```
 Used classes: {', '.join(result.used_classes)}
 Used animations: {', '.join(result.used_animations)}
