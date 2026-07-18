@@ -96,18 +96,26 @@ def build_video_gen_graph() -> StateGraph:
     
     builder.add_edge("recorrector", "code_executor")
     
+    # Barrier join for the audio and video branches. Joining both branches
+    # directly on `synchronizer` made LangGraph run it (and the merger) once
+    # per incoming branch: the first, premature run saw no video and cleaned
+    # up temp artifacts the real run still needed. `video_ready` is a no-op
+    # landing point for the video branch so the list-edge below waits for
+    # BOTH branches and runs the synchronizer exactly once.
+    builder.add_node("video_ready", lambda state: {})
+
     # After render checking, decide if duration needs fixing
     builder.add_conditional_edges(
         "render_checker",
         should_fix_duration,
         {
             "video_duration_fixer": "video_duration_fixer",
-            "synchronizer": "synchronizer",
+            "synchronizer": "video_ready",
         }
     )
-    
-    builder.add_edge("video_duration_fixer", "synchronizer")
-    builder.add_edge("transcript_processor", "synchronizer")
+
+    builder.add_edge("video_duration_fixer", "video_ready")
+    builder.add_edge(["transcript_processor", "video_ready"], "synchronizer")
     builder.add_edge("synchronizer", "audio_video_merger")
     builder.add_edge("audio_video_merger", END)
     
