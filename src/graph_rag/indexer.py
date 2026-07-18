@@ -12,8 +12,6 @@ import hashlib
 from pathlib import Path
 from typing import Generator, Optional
 
-from pydantic import BaseModel
-
 from .db import GraphRAGClients
 from .schema import (
     ExampleNode,
@@ -22,29 +20,13 @@ from .schema import (
     SCHEMA_CONSTRAINTS,
     SCHEMA_INDEXES,
 )
-from ..config import get_settings
-
-
-class IndexerConfig(BaseModel):
-    """Configuration for the indexer."""
-    neo4j_uri: str = "bolt://localhost:7687"
-    neo4j_user: str = "neo4j"
-    neo4j_password: str = "password"
-    chroma_persist_dir: str = "./chroma_db"
-    batch_size: int = 100
 
 
 class ManimIndexer(GraphRAGClients):
-    """Indexes Manim code examples into Graph RAG system."""
+    """Indexes Manim code examples into Graph RAG system.
 
-    def __init__(self, config: Optional[IndexerConfig] = None):
-        super().__init__()
-        if config:
-            # Override settings from explicit config
-            settings = get_settings()
-            self._config = config
-        else:
-            self._config = None
+    Connection settings come from ``Settings`` (via ``GraphRAGClients``).
+    """
 
     def _generate_id(self, text: str) -> str:
         """Generate unique ID from text."""
@@ -258,9 +240,9 @@ class ManimIndexer(GraphRAGClients):
         return total_indexed
 
 
-def index_dataset(data_dir: str, config: Optional[IndexerConfig] = None):
+def index_dataset(data_dir: str):
     """Main function to index the Manim dataset."""
-    indexer = ManimIndexer(config)
+    indexer = ManimIndexer()
     try:
         return indexer.index_directory(data_dir)
     finally:

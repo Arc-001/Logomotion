@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
-from .config import get_settings
+from .config import get_settings, normalize_render_quality
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -27,7 +27,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=list(get_settings().cors_allow_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -70,6 +70,20 @@ class GenerateRequest(BaseModel):
         default=False,
         description="Fetch latest web / Wikipedia data before generating the animation",
     )
+    quality: Optional[Literal["low", "medium", "high", "l", "m", "h", "p", "k"]] = Field(
+        default=None,
+        description="Render quality (default from settings; low ≈ 480p, medium ≈ 720p, high ≈ 1080p)",
+    )
+    fps: Optional[int] = Field(
+        default=None,
+        ge=5,
+        le=60,
+        description="Frame rate override (default: manim's default for the quality)",
+    )
+    visual_qa: Optional[bool] = Field(
+        default=None,
+        description="Review rendered frames with the multimodal LLM and auto-fix layout problems (adds latency)",
+    )
 
     @model_validator(mode="after")
     def apply_defaults_and_validate(self):
@@ -86,6 +100,12 @@ class GenerateRequest(BaseModel):
             self.orientation = settings.video_orientation
         if self.duration_mode is None:
             self.duration_mode = settings.duration_mode
+        if self.quality is None:
+            self.quality = settings.render_quality
+        else:
+            self.quality = normalize_render_quality(self.quality)
+        if self.visual_qa is None:
+            self.visual_qa = settings.visual_qa_enabled
         return self
 
 
@@ -103,6 +123,7 @@ class JobStatus(BaseModel):
     video_path: Optional[str] = None
     code: Optional[str] = None
     error: Optional[str] = None
+    warnings: Optional[list[str]] = None  # non-fatal pipeline issues
     web_sources: Optional[list] = None  # populated when web_search was used
 
 
@@ -165,6 +186,9 @@ async def generate_video(request: GenerateRequest, background_tasks: BackgroundT
         request.orientation,
         request.duration_mode,
         request.web_search,
+        request.quality,
+        request.fps,
+        request.visual_qa,
     )
 
     return GenerateResponse(
@@ -244,6 +268,9 @@ async def _run_generation_job(
     orientation: str,
     duration_mode: str,
     web_search: bool = False,
+    quality: Optional[str] = None,
+    fps: Optional[int] = None,
+    visual_qa: Optional[bool] = None,
 ):
     """Background task to run video generation."""
     from .agent.graph import generate_video
@@ -259,9 +286,13 @@ async def _run_generation_job(
             orientation=orientation,
             duration_mode=duration_mode,
             web_search_enabled=web_search,
+            render_quality=quality,
+            render_fps=fps,
+            visual_qa=visual_qa,
         )
 
         video_path = result.get("final_output_path") or result.get("rendered_video_path")
+        warnings = result.get("pipeline_warnings") or None
 
         if video_path:
             jobs[job_id] = JobStatus(
@@ -269,13 +300,18 @@ async def _run_generation_job(
                 status="completed",
                 video_path=video_path,
                 code=result.get("code"),
+                warnings=warnings,
                 web_sources=result.get("web_sources") or None,
             )
         else:
+            error = result.get("error")
+            if not error and warnings:
+                error = "; ".join(warnings)
             jobs[job_id] = JobStatus(
                 job_id=job_id,
                 status="failed",
-                error=result.get("error", "Unknown error"),
+                error=error or "Unknown error",
+                warnings=warnings,
             )
     except Exception as e:
         jobs[job_id] = JobStatus(
@@ -290,3 +326,9 @@ async def _run_generation_job(
 # ---------------------------------------------------------------------------
 
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# The Vite build references its hashed bundles as /assets/..., so the
+# assets directory must be mounted at that exact path.
+_ASSETS_DIR = STATIC_DIR / "assets"
+if _ASSETS_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=str(_ASSETS_DIR)), name="assets")

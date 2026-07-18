@@ -20,17 +20,9 @@ from .config import get_settings
 
 def cmd_index(args):
     """Index the Manim dataset."""
-    from .graph_rag.indexer import ManimIndexer, IndexerConfig
+    from .graph_rag.indexer import ManimIndexer
 
-    settings = get_settings()
-    config = IndexerConfig(
-        neo4j_uri=settings.neo4j_uri,
-        neo4j_user=settings.neo4j_user,
-        neo4j_password=settings.neo4j_password,
-        chroma_persist_dir=settings.chroma_persist_dir,
-    )
-
-    indexer = ManimIndexer(config)
+    indexer = ManimIndexer()
     try:
         count = indexer.index_directory(args.data)
         print(f"\n✓ Successfully indexed {count} examples")
@@ -47,15 +39,21 @@ def cmd_generate(args):
     print(f"Generating video for: {args.prompt}")
     print("-" * 50)
 
+    from .config import normalize_render_quality
+
     scene_length = args.length if args.length != 1.0 else settings.video_length
     explanation_depth = args.depth or settings.explanation_depth
     orientation = args.orientation or settings.video_orientation
     duration_mode = args.duration_mode or settings.duration_mode
+    render_quality = normalize_render_quality(args.quality) if args.quality else settings.render_quality
+    render_fps = args.fps or settings.render_fps
+    visual_qa = True if args.visual_qa else None  # None = default from settings
 
     print(f"[CONFIG] Scene length: {scene_length} minutes ({scene_length * 60} seconds)")
     print(f"[CONFIG] Explanation depth: {explanation_depth}")
     print(f"[CONFIG] Orientation: {orientation}")
     print(f"[CONFIG] Duration mode: {duration_mode}")
+    print(f"[CONFIG] Render quality: {render_quality}" + (f", fps: {render_fps}" if render_fps else ""))
 
     result = generate_video_sync(
         scene_title=args.title or "Generated Scene",
@@ -64,6 +62,9 @@ def cmd_generate(args):
         explanation_depth=explanation_depth,
         orientation=orientation,
         duration_mode=duration_mode,
+        render_quality=render_quality,
+        render_fps=render_fps,
+        visual_qa=visual_qa,
     )
 
     if result.get("final_output_path"):
@@ -74,6 +75,12 @@ def cmd_generate(args):
         print("\n✗ Video generation failed")
         if result.get("error"):
             print(f"Error: {result['error']}")
+
+    warnings = result.get("pipeline_warnings")
+    if warnings:
+        print("\nWarnings:")
+        for warning in warnings:
+            print(f"  - {warning}")
 
     if args.output and result.get("code"):
         output_dir = Path(args.output)
@@ -156,6 +163,24 @@ def main():
         default=None,
         dest="duration_mode",
         help="Duration enforcement: 'guide' = soft hint (default), 'strict' = ffmpeg speed adjust",
+    )
+    gen_parser.add_argument(
+        "--quality", "-q",
+        choices=["low", "medium", "high", "l", "m", "h", "p", "k"],
+        default=None,
+        help="Render quality (default: from .env or 'medium')",
+    )
+    gen_parser.add_argument(
+        "--fps",
+        type=int,
+        default=None,
+        help="Frame rate override (default: manim's default for the quality)",
+    )
+    gen_parser.add_argument(
+        "--visual-qa",
+        action="store_true",
+        dest="visual_qa",
+        help="Review rendered frames with the multimodal LLM and auto-fix layout problems",
     )
 
     serve_parser = subparsers.add_parser("serve", help="Start the API server")

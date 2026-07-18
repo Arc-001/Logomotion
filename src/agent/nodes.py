@@ -14,10 +14,12 @@ Implements the following nodes from the architecture diagram:
 
 import ast
 import asyncio
+import json
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Literal, Optional
@@ -31,9 +33,9 @@ except ImportError:
 
 from .state import VideoGenState, TranscriptSection
 from ..config import get_settings
-from ..graph_rag.retriever import ManimRetriever
+from ..graph_rag.schema import KNOWN_MANIM_CLASSES, KNOWN_ANIMATIONS
 from ..manim_runner.executor import ManimExecutor
-from ..manim_runner.validator import get_video_duration
+from ..manim_runner.validator import VideoValidator, get_video_duration
 
 
 # ============================================================================
@@ -53,27 +55,43 @@ def get_llm_client() -> Optional["OpenAI"]:
 
 
 def llm_chat(messages: list[dict], temperature: float = 0.2) -> Optional[str]:
-    """Call OpenRouter LLM with messages."""
+    """Call OpenRouter LLM with messages.
+
+    Message ``content`` is passed through unchanged, so multimodal
+    list-of-parts content (text + image_url) works as well as plain strings.
+
+    Retries transient failures (exceptions or empty responses) with
+    exponential backoff before giving up and returning None.
+    """
     client = get_llm_client()
     if not client:
         return None
 
     settings = get_settings()
+    attempts = max(1, settings.llm_retries)
 
-    try:
-        completion = client.chat.completions.create(
-            extra_headers={
-                "HTTP-Referer": "https://manim-agent.local",
-                "X-Title": "Manim Graph RAG Agent",
-            },
-            model=settings.openrouter_model,
-            messages=messages,
-            temperature=temperature,
-        )
-        return completion.choices[0].message.content
-    except Exception as e:
-        print(f"LLM call failed: {e}")
-        return None
+    for attempt in range(attempts):
+        try:
+            completion = client.chat.completions.create(
+                extra_headers={
+                    "HTTP-Referer": "https://manim-agent.local",
+                    "X-Title": "Manim Graph RAG Agent",
+                },
+                model=settings.openrouter_model,
+                messages=messages,
+                temperature=temperature,
+            )
+            content = completion.choices[0].message.content
+            if content:
+                return content
+            print(f"LLM call returned empty response (attempt {attempt + 1}/{attempts})")
+        except Exception as e:
+            print(f"LLM call failed (attempt {attempt + 1}/{attempts}): {e}")
+
+        if attempt < attempts - 1:
+            time.sleep(2 ** attempt)
+
+    return None
 
 
 # ============================================================================
@@ -102,6 +120,83 @@ def _extract_code_block(text: str) -> str:
         return generic_match.group(1).strip()
 
     return text.strip()
+
+
+# ============================================================================
+# RAG hint extraction — activates the graph branch of hybrid_search
+# ============================================================================
+
+_KNOWN_CLASS_NAMES = [c.name for c in KNOWN_MANIM_CLASSES]
+_KNOWN_ANIMATION_NAMES = [a.name for a in KNOWN_ANIMATIONS]
+
+_CLASS_KEYWORD_HINTS = {
+    "graph": ["Axes", "NumberPlane"],
+    "plot": ["Axes", "ParametricFunction"],
+    "axis": ["Axes"],
+    "axes": ["Axes"],
+    "grid": ["NumberPlane"],
+    "function": ["Axes", "ParametricFunction"],
+    "curve": ["ParametricFunction", "Axes"],
+    "equation": ["MathTex"],
+    "formula": ["MathTex"],
+    "theorem": ["MathTex"],
+    "vector": ["Vector", "Arrow"],
+    "arrow": ["Arrow"],
+    "circle": ["Circle"],
+    "square": ["Square"],
+    "rectangle": ["Rectangle"],
+    "line": ["Line"],
+    "point": ["Dot"],
+    "3d": ["ThreeDScene", "ThreeDAxes"],
+    "sphere": ["Sphere", "ThreeDScene"],
+    "surface": ["ParametricSurface", "ThreeDScene"],
+    "complex": ["ComplexPlane"],
+    "label": ["Text"],
+}
+
+_ANIMATION_KEYWORD_HINTS = {
+    "fade": ["FadeIn", "FadeOut"],
+    "transform": ["Transform"],
+    "morph": ["Transform"],
+    "rotate": ["Rotate"],
+    "rotation": ["Rotate"],
+    "grow": ["GrowFromCenter"],
+    "highlight": ["Indicate"],
+    "emphasize": ["Indicate"],
+    "draw": ["Create", "Write"],
+}
+
+
+def _extract_rag_hints(text: str) -> tuple[list[str], list[str]]:
+    """Mine likely Manim class and animation names from the request text.
+
+    Deterministic token matching (no LLM call): known names appearing in
+    the text plus a small topic-keyword map. The hints feed the graph
+    branch of hybrid_search, which is inactive without them.
+    """
+    tokens = set(re.findall(r"[a-z0-9]+", text.lower()))
+
+    class_hints = [name for name in _KNOWN_CLASS_NAMES if name.lower() in tokens]
+    animation_hints = [name for name in _KNOWN_ANIMATION_NAMES if name.lower() in tokens]
+
+    for keyword, hints in _CLASS_KEYWORD_HINTS.items():
+        if keyword in tokens:
+            class_hints.extend(h for h in hints if h not in class_hints)
+    for keyword, hints in _ANIMATION_KEYWORD_HINTS.items():
+        if keyword in tokens:
+            animation_hints.extend(h for h in hints if h not in animation_hints)
+
+    return class_hints, animation_hints
+
+
+def _truncate_code_example(code: str, limit: int = 3000) -> str:
+    """Cut a code example at a line boundary with an explicit marker."""
+    if len(code) <= limit:
+        return code
+    cut = code.rfind("\n", 0, limit)
+    if cut <= 0:
+        cut = limit
+    return code[:cut] + "\n# ... truncated"
 
 
 # ============================================================================
@@ -189,6 +284,113 @@ def web_research_node(state: VideoGenState) -> dict:
 
 
 # ============================================================================
+# NODE 0b: Storyboard Planner (optional — plans timed sections before code)
+# ============================================================================
+
+def _parse_storyboard_response(response_text: str, target_seconds: int) -> Optional[list[dict]]:
+    """Extract and validate the storyboard JSON from an LLM response."""
+    fence_match = re.search(r"```(?:json)?\s*\n(.*?)```", response_text, re.DOTALL)
+    raw = fence_match.group(1) if fence_match else response_text
+
+    data = json.loads(raw)
+    sections = data.get("sections") if isinstance(data, dict) else None
+    if not isinstance(sections, list) or not sections:
+        return None
+
+    parsed = []
+    for section in sections:
+        if not isinstance(section, dict):
+            return None
+        duration = float(section.get("duration_seconds", 0))
+        if duration <= 0:
+            return None
+        parsed.append({
+            "title": str(section.get("title", "")),
+            "duration_seconds": duration,
+            "visuals": str(section.get("visuals", "")),
+            "narration": str(section.get("narration", "")),
+        })
+
+    # Rescale so section durations sum exactly to the target
+    total = sum(s["duration_seconds"] for s in parsed)
+    if total > 0 and abs(total - target_seconds) > 1:
+        scale = target_seconds / total
+        for s in parsed:
+            s["duration_seconds"] = round(s["duration_seconds"] * scale, 1)
+
+    return parsed
+
+
+def storyboard_node(state: VideoGenState) -> dict:
+    """
+    Plan the video as timed sections before any code is written.
+
+    Produces a storyboard the code generator must implement, giving it a
+    pacing and layout skeleton instead of improvising structure, duration,
+    and narration in one shot.
+
+    Input: scene_title, scene_prompt_description, scene_length, web_context
+    Output: storyboard (list of sections) or None on failure
+    """
+    target_seconds = int(state["scene_length"] * 60)
+    depth = state.get("explanation_depth", "detailed")
+    depth_config = DEPTH_CONFIGS.get(depth, DEPTH_CONFIGS["detailed"])
+
+    print(f"[STORYBOARD] Planning {target_seconds}s video for: {state['scene_title']!r}")
+
+    web_context = state.get("web_context", "")
+    web_block = ""
+    if web_context and not web_context.startswith("[Web research"):
+        web_block = f"\nUse this up-to-date research where relevant:\n{web_context}\n"
+
+    prompt = f"""Plan an educational Manim animation before any code is written.
+
+Topic: {state["scene_prompt_description"]}
+Title: {state["scene_title"]}
+Target duration: {target_seconds} seconds
+Detail level: {depth_config["detail_level"]}
+{web_block}
+Break the video into 3 to 8 sections. Respond with STRICT JSON only — no prose, no markdown fences:
+
+{{"sections": [{{"title": "...", "duration_seconds": 10, "visuals": "...", "narration": "..."}}]}}
+
+Rules:
+- duration_seconds across all sections MUST sum to exactly {target_seconds}
+- visuals: what appears on screen and how it is laid out — one clear focus per section
+- narration: one or two sentences of what the voiceover says during the section
+- The first section introduces the topic; the last one concludes it"""
+
+    response_text = llm_chat(
+        [{"role": "user", "content": prompt}],
+        temperature=0.4,
+    )
+
+    if not response_text:
+        print("[STORYBOARD] LLM unavailable — continuing without a storyboard")
+        return {
+            "storyboard": None,
+            "pipeline_warnings": ["Storyboard planning failed (LLM unavailable), generated single-shot"],
+        }
+
+    try:
+        storyboard = _parse_storyboard_response(response_text, target_seconds)
+    except (json.JSONDecodeError, TypeError, ValueError) as e:
+        print(f"[STORYBOARD] Could not parse storyboard: {e}")
+        storyboard = None
+
+    if not storyboard:
+        return {
+            "storyboard": None,
+            "pipeline_warnings": ["Storyboard planning produced unusable output, generated single-shot"],
+        }
+
+    for i, section in enumerate(storyboard):
+        print(f"[STORYBOARD]   {i + 1}. {section['title']} ({section['duration_seconds']}s)")
+
+    return {"storyboard": storyboard}
+
+
+# ============================================================================
 # NODE 1: Video Code Generator (with Graph RAG)
 # ============================================================================
 
@@ -199,12 +401,23 @@ def video_code_gen_node(state: VideoGenState) -> dict:
     Input: system_message, scene_title, scene_prompt_description
     Output: code, transcript, retrieved_examples, retrieved_context
     """
+    from ..graph_rag.retriever import ManimRetriever  # deferred: pulls in DB drivers
+
+    warnings: list[str] = []
     retriever = ManimRetriever()
+
+    class_hints, animation_hints = _extract_rag_hints(
+        f"{state['scene_title']} {state['scene_prompt_description']}"
+    )
+    if class_hints or animation_hints:
+        print(f"[CODE GEN] RAG hints — classes: {class_hints}, animations: {animation_hints}")
 
     try:
         results = retriever.hybrid_search(
             query=state["scene_prompt_description"],
-            limit=3,
+            class_hints=class_hints or None,
+            animation_hints=animation_hints or None,
+            limit=4,
         )
 
         context_parts = []
@@ -214,7 +427,7 @@ def video_code_gen_node(state: VideoGenState) -> dict:
             context_parts.append(f"""
 ### Example: {result.prompt[:100]}...
 ```python
-{result.code[:1500]}...
+{_truncate_code_example(result.code)}
 ```
 Used classes: {', '.join(result.used_classes)}
 Used animations: {', '.join(result.used_animations)}
@@ -224,6 +437,7 @@ Used animations: {', '.join(result.used_animations)}
     except Exception as e:
         example_ids = []
         retrieved_context = f"RAG retrieval failed: {e}"
+        warnings.append(f"RAG retrieval failed, generating without examples: {e}")
     finally:
         retriever.close()
 
@@ -273,6 +487,30 @@ accurate, current, and informative:
     else:
         web_section = ""
 
+    # Inject the storyboard plan when the planning stage produced one
+    storyboard = state.get("storyboard")
+    if storyboard:
+        lines = []
+        cursor = 0.0
+        for i, section in enumerate(storyboard):
+            start = cursor
+            cursor += section["duration_seconds"]
+            lines.append(
+                f"{i + 1}. [{start:.0f}s–{cursor:.0f}s] {section['title']}\n"
+                f"   Visuals: {section['visuals']}\n"
+                f"   Narration: {section['narration']}"
+            )
+        storyboard_section = f"""
+## STORYBOARD (IMPLEMENT EXACTLY THESE SECTIONS AND DURATIONS)
+{chr(10).join(lines)}
+
+- Each section's animations plus self.wait() calls must fill its allotted time window.
+- Apply the CLEAR DESK rule between sections.
+- Transcript timestamps MUST align with the section start times above.
+"""
+    else:
+        storyboard_section = ""
+
     prompt = f"""Create a Manim animation based on this request:
 
 **Title:** {state["scene_title"]}
@@ -280,7 +518,7 @@ accurate, current, and informative:
 **Target Duration:** {target_seconds} seconds ({state["scene_length"]} minutes)
 **Explanation Level:** {depth} - {depth_config["detail_level"]}
 **Orientation:** {orientation} ({frame_width} × {frame_height})
-{web_section}
+{web_section}{storyboard_section}
 ## CRITICAL REQUIREMENTS (MUST FOLLOW STRICTLY):
 
 ### 1. SCREEN BOUNDS — NEVER GO OUT OF FRAME
@@ -418,8 +656,10 @@ transcript = {{
         if transcript_match:
             try:
                 transcript = ast.literal_eval(transcript_match.group(1))
-            except (SyntaxError, ValueError, NameError):
-                pass
+            except (SyntaxError, ValueError, NameError) as e:
+                warnings.append(f"Transcript could not be parsed, video will have no narration: {e}")
+        else:
+            warnings.append("LLM response contained no transcript block, video will have no narration")
 
         scene_match = re.search(r'class\s+(\w+)\s*\([^)]*Scene[^)]*\)', code)
         scene_class_name = scene_match.group(1) if scene_match else "GeneratedScene"
@@ -435,6 +675,7 @@ class GeneratedScene(Scene):
 '''
         transcript = {0: f"Welcome to {state['scene_title']}"}
         scene_class_name = "GeneratedScene"
+        warnings.append("LLM was unavailable, generated a placeholder title scene instead")
 
     return {
         "code": code,
@@ -442,6 +683,7 @@ class GeneratedScene(Scene):
         "transcript": transcript,
         "retrieved_examples": example_ids,
         "retrieved_context": retrieved_context,
+        "pipeline_warnings": warnings,
         "messages": [{"role": "assistant", "content": f"Generated code for {state['scene_title']}"}],
     }
 
@@ -465,12 +707,18 @@ def code_executor_node(state: VideoGenState) -> dict:
     print(f"[EXECUTOR] Starting Manim render for scene: {scene_class}")
 
     settings = get_settings()
-    executor = ManimExecutor(quality="l", timeout=settings.render_timeout)
+    executor = ManimExecutor(
+        quality=state.get("render_quality") or settings.render_quality,
+        fps=state.get("render_fps"),
+        timeout=settings.render_timeout,
+    )
     result = executor.execute(
         code=state["code"],
         scene_class_name=scene_class,
         orientation=orientation,
     )
+
+    exec_temp_dirs = [str(Path(result.code_path).parent)] if result.code_path else []
 
     if result.success:
         print(f"[EXECUTOR] Render SUCCESS: {result.video_path}")
@@ -479,6 +727,7 @@ def code_executor_node(state: VideoGenState) -> dict:
             "error": None,
             "render_logs": f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}",
             "temp_code_path": result.code_path,
+            "temp_dirs": exec_temp_dirs,
         }
 
     print(f"[EXECUTOR] Render FAILED: {(result.error or '')[:200]}...")
@@ -487,6 +736,7 @@ def code_executor_node(state: VideoGenState) -> dict:
         "error_count": 1,
         "render_logs": f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}",
         "temp_code_path": result.code_path,
+        "temp_dirs": exec_temp_dirs,
     }
 
 
@@ -615,6 +865,190 @@ def transcript_processor_node(state: VideoGenState) -> dict:
 
 
 # ============================================================================
+# NODE 4b: Visual QA (optional — multimodal review of rendered frames)
+# ============================================================================
+
+def _encode_image_data_url(path: str) -> str:
+    """Base64-encode a JPEG frame as a data URL for a multimodal message."""
+    import base64
+
+    with open(path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def _parse_visual_verdict(response_text: str) -> Optional[dict]:
+    """Extract the {"acceptable": ..., "issues": [...]} verdict JSON."""
+    fence_match = re.search(r"```(?:json)?\s*\n(.*?)```", response_text, re.DOTALL)
+    raw = fence_match.group(1) if fence_match else response_text
+
+    data = json.loads(raw)
+    if not isinstance(data, dict) or "acceptable" not in data:
+        return None
+
+    issues = data.get("issues") or []
+    if not isinstance(issues, list):
+        issues = []
+    return {"acceptable": bool(data["acceptable"]), "issues": [i for i in issues if isinstance(i, dict)]}
+
+
+def visual_qa_node(state: VideoGenState) -> dict:
+    """
+    Review frames sampled from the rendered video with the multimodal LLM.
+
+    Detects layout problems the prompt rules cannot guarantee: overlapping
+    elements, off-frame content, empty screens, unreadable text. This is the
+    only stage that actually looks at the produced pixels.
+
+    Input: rendered_video_path
+    Output: visual_acceptable, visual_issues
+    """
+    from ..manim_runner.frames import extract_frames
+
+    video_path = state.get("rendered_video_path")
+    settings = get_settings()
+
+    if not video_path or not Path(video_path).exists():
+        print("[VISUAL QA] No rendered video to review, skipping")
+        return {"visual_acceptable": True, "visual_issues": []}
+
+    frames = extract_frames(video_path, count=settings.visual_qa_frames)
+    if not frames:
+        print("[VISUAL QA] Frame extraction failed, skipping review")
+        return {
+            "visual_acceptable": True,
+            "visual_issues": [],
+            "pipeline_warnings": ["Visual QA skipped: frame extraction failed"],
+        }
+
+    frame_dirs = list({str(Path(f["path"]).parent) for f in frames})
+    timestamps = ", ".join(f"frame {i} at {f['timestamp']}s" for i, f in enumerate(frames))
+
+    instruction = f"""You are reviewing frames sampled from a rendered Manim educational animation.
+
+Frames in order: {timestamps}.
+
+Check every frame for layout problems a viewer would notice:
+- overlapping text or shapes (elements rendered on top of each other)
+- content cut off at the frame edge or fully off-frame
+- empty or near-empty frames (a brief transition frame is fine)
+- unreadable text (too small, or low contrast against the background)
+
+Respond with STRICT JSON only — no prose, no markdown fences:
+{{"acceptable": true, "issues": [{{"frame_index": 0, "timestamp": 0.0, "problem": "...", "fix": "..."}}]}}
+
+Set "acceptable" to false only when at least one clear problem exists.
+Each "fix" must be a concrete, code-level suggestion (e.g. "FadeOut the bullet list before showing the diagram", "scale the equation with scale_to_fit_width")."""
+
+    content = [{"type": "text", "text": instruction}]
+    for frame in frames:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": _encode_image_data_url(frame["path"])},
+        })
+
+    response_text = llm_chat([{"role": "user", "content": content}], temperature=0.1)
+
+    verdict = None
+    if response_text:
+        try:
+            verdict = _parse_visual_verdict(response_text)
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            print(f"[VISUAL QA] Could not parse verdict: {e}")
+
+    if verdict is None:
+        # QA must never block the pipeline
+        print("[VISUAL QA] Review unavailable, accepting video as-is")
+        return {
+            "visual_acceptable": True,
+            "visual_issues": [],
+            "temp_dirs": frame_dirs,
+            "pipeline_warnings": ["Visual QA review failed, video accepted unreviewed"],
+        }
+
+    if verdict["acceptable"]:
+        print("[VISUAL QA] Verdict: acceptable")
+        return {"visual_acceptable": True, "visual_issues": [], "temp_dirs": frame_dirs}
+
+    print(f"[VISUAL QA] Verdict: {len(verdict['issues'])} issue(s) found")
+    for issue in verdict["issues"]:
+        print(f"[VISUAL QA]   - {issue.get('timestamp', '?')}s: {issue.get('problem', '')}")
+
+    result: dict = {
+        "visual_acceptable": False,
+        "visual_issues": verdict["issues"],
+        "temp_dirs": frame_dirs,
+    }
+
+    fix_count = state.get("visual_fix_count", 0)
+    if fix_count >= get_settings().visual_qa_max_attempts:
+        # Out of fix attempts — surface the remaining issues instead
+        problems = "; ".join(str(i.get("problem", "")) for i in verdict["issues"][:3])
+        result["pipeline_warnings"] = [f"Visual issues remain after fixes: {problems}"]
+
+    return result
+
+
+def visual_recorrector_node(state: VideoGenState) -> dict:
+    """
+    Fix layout problems reported by visual QA without touching timings.
+
+    Input: code, visual_issues
+    Output: corrected code, visual_fix_count incremented
+    """
+    issues = state.get("visual_issues", [])
+    print(f"[VISUAL FIX] Attempting layout fix for {len(issues)} issue(s)")
+
+    issue_lines = "\n".join(
+        f"{i + 1}. At ~{issue.get('timestamp', '?')}s: {issue.get('problem', '')}\n"
+        f"   Suggested fix: {issue.get('fix', '')}"
+        for i, issue in enumerate(issues)
+    )
+
+    messages = [
+        {"role": "system", "content": """You are an expert at fixing layout problems in Manim v0.18+ code.
+
+A visual review of the RENDERED video found concrete layout problems. Fix ONLY those.
+
+LAYOUT RULES:
+- Clear the screen before new topics: self.play(FadeOut(Group(*self.mobjects)))
+- Position relative to edges/objects: .to_edge(...), .next_to(...), .move_to(ORIGIN)
+- Scale groups to fit: group.scale_to_fit_width(min(group.width, config.frame_width - 2))
+
+CRITICAL TIMING RULE:
+- DO NOT change the overall duration, the number of animations, run_time, or self.wait() times. The narration audio has already been generated from the original timings; changing them desynchronizes the audio. ONLY fix the layout.
+
+Return ONLY the corrected Python code."""},
+        {"role": "user", "content": f"""The following Manim code rendered successfully, but reviewing the video found these layout problems:
+
+{issue_lines}
+
+```python
+{state["code"]}
+```
+
+Fix the layout problems and return the complete corrected code. Only return Python code, nothing else."""},
+    ]
+
+    fixed_code = llm_chat(messages, temperature=0.1)
+
+    if not fixed_code:
+        print("[VISUAL FIX] LLM unavailable, keeping current code")
+        return {
+            "visual_fix_count": 1,
+            "error": None,
+            "pipeline_warnings": ["Visual layout fix failed (LLM unavailable)"],
+        }
+
+    return {
+        "code": _extract_code_block(fixed_code).strip(),
+        "visual_fix_count": 1,
+        "error": None,
+        "messages": [{"role": "assistant", "content": "Fixed layout based on visual QA feedback"}],
+    }
+
+
+# ============================================================================
 # NODE 5: Render Checker
 # ============================================================================
 
@@ -641,19 +1075,31 @@ def render_checker_node(state: VideoGenState) -> dict:
 
     if not video_path or not Path(video_path).exists():
         print("[RENDER CHECK] Video file does not exist!")
+        warnings = []
+        render_error = state.get("error")
+        if render_error:
+            warnings.append(f"Render failed after all retries: {str(render_error)[:300]}")
         return {
             "video_valid": False,
             "validation_errors": ["Video file does not exist"],
             "checked_video_path": None,
             "actual_duration": None,
+            "pipeline_warnings": warnings,
         }
 
-    file_size = Path(video_path).stat().st_size
-    print(f"[RENDER CHECK] Video file size: {file_size} bytes")
-    if file_size < 1000:
-        errors.append(f"Video file too small: {file_size} bytes")
+    integrity = VideoValidator().validate(video_path)
+    errors.extend(integrity.errors)
+    if integrity.width and integrity.height:
+        print(
+            f"[RENDER CHECK] Video: {integrity.width}x{integrity.height} "
+            f"({integrity.codec or 'unknown codec'})"
+        )
+    for integrity_warning in integrity.warnings:
+        print(f"[RENDER CHECK] Warning: {integrity_warning}")
 
-    actual_duration = get_video_duration(video_path)
+    actual_duration = integrity.duration
+    if actual_duration is None:
+        actual_duration = get_video_duration(video_path)
     if actual_duration is not None:
         print(f"[RENDER CHECK] Actual duration: {actual_duration:.1f}s (target: {target_duration:.1f}s)")
 
@@ -678,11 +1124,18 @@ def render_checker_node(state: VideoGenState) -> dict:
 
     print(f"[RENDER CHECK] Validation {'passed' if checked_path else 'failed'}: {errors}")
 
+    warnings = list(non_duration_errors)
+    if state.get("duration_mode", "guide") == "guide":
+        # In guide mode nothing downstream corrects the duration, so at least
+        # tell the user how far off the video came out.
+        warnings.extend(e for e in errors if "Duration mismatch" in e)
+
     return {
         "video_valid": video_valid,
         "validation_errors": errors,
         "checked_video_path": checked_path,
         "actual_duration": actual_duration,
+        "pipeline_warnings": warnings,
     }
 
 
@@ -741,8 +1194,9 @@ def video_duration_fixer_node(state: VideoGenState) -> dict:
     action = "speeding up" if ratio > 1.0 else "slowing down"
     print(f"[DURATION FIX] Video is {direction} ({original_duration:.1f}s vs {target_duration:.1f}s) — {action} (setpts={pts_factor:.4f}*PTS)")
 
+    temp_dir = tempfile.mkdtemp(prefix="manim_durfix_")
+
     try:
-        temp_dir = tempfile.mkdtemp(prefix="manim_durfix_")
         adjusted_path = Path(temp_dir) / "duration_adjusted.mp4"
 
         cmd = [
@@ -758,11 +1212,11 @@ def video_duration_fixer_node(state: VideoGenState) -> dict:
 
         if result.returncode != 0:
             print(f"[DURATION FIX] ffmpeg failed: {result.stderr[:300]}")
-            return {"duration_adjusted": False, "duration_factor": None}
+            return {"duration_adjusted": False, "duration_factor": None, "temp_dirs": [temp_dir]}
 
         if not adjusted_path.exists():
             print("[DURATION FIX] Output file not created")
-            return {"duration_adjusted": False, "duration_factor": None}
+            return {"duration_adjusted": False, "duration_factor": None, "temp_dirs": [temp_dir]}
 
         new_duration = get_video_duration(str(adjusted_path))
         if new_duration is None:
@@ -781,14 +1235,15 @@ def video_duration_fixer_node(state: VideoGenState) -> dict:
             "duration_adjusted": True,
             "duration_factor": actual_speed_ratio,
             "actual_duration": new_duration,
+            "temp_dirs": [temp_dir],
         }
 
     except subprocess.TimeoutExpired:
         print("[DURATION FIX] ffmpeg timeout")
-        return {"duration_adjusted": False, "duration_factor": None}
+        return {"duration_adjusted": False, "duration_factor": None, "temp_dirs": [temp_dir]}
     except Exception as e:
         print(f"[DURATION FIX] Error: {e}")
-        return {"duration_adjusted": False, "duration_factor": None}
+        return {"duration_adjusted": False, "duration_factor": None, "temp_dirs": [temp_dir]}
 
 
 # ============================================================================
@@ -848,6 +1303,62 @@ def synchronizer_node(state: VideoGenState) -> dict:
 # NODE 7: Audio Video Merger (with ffmpeg)
 # ============================================================================
 
+_TEMP_PREFIXES = ("manim_exec_", "manim_durfix_", "manim_merge_", "manim_frames_", "kokoro_")
+
+
+def _cleanup_temp_artifacts(state: VideoGenState, extra_dirs: Optional[list] = None) -> None:
+    """Remove per-job temp directories and TTS wav files.
+
+    Only paths directly under the system temp dir whose basename carries one
+    of the known job prefixes are removed, so a bad path in state can never
+    delete anything else.
+    """
+    tmp_root = Path(tempfile.gettempdir()).resolve()
+
+    for dir_str in list(state.get("temp_dirs") or []) + list(extra_dirs or []):
+        if not dir_str:
+            continue
+        path = Path(dir_str).resolve()
+        if path.parent != tmp_root or not path.name.startswith(_TEMP_PREFIXES):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+
+    for wav_str in state.get("audio_segments") or []:
+        if not wav_str:
+            continue
+        path = Path(wav_str).resolve()
+        if path.parent == tmp_root and path.name.startswith("kokoro_"):
+            path.unlink(missing_ok=True)
+
+
+def _finish_merge(state: VideoGenState, video_path: Optional[str], merge_dir: Optional[str] = None) -> dict:
+    """Persist the final video into the project output dir, then clean up temp artifacts.
+
+    Temp dirs are only removed once the video has been copied out of them
+    (or when there is no video at all), so a failed copy never loses the render.
+    """
+    final_path = None
+    persisted = False
+
+    if video_path and Path(video_path).exists():
+        try:
+            project_output = Path("output")
+            project_output.mkdir(parents=True, exist_ok=True)
+            output_copy = project_output / f"output_{uuid.uuid4().hex[:8]}.mp4"
+            shutil.copy2(video_path, output_copy)
+            final_path = str(output_copy.resolve())
+            persisted = True
+            print(f"[AUDIO MERGE] Final output: {final_path}")
+        except OSError as e:
+            print(f"[AUDIO MERGE] Could not copy output out of temp dir: {e}")
+            final_path = video_path
+
+    if persisted or final_path is None:
+        _cleanup_temp_artifacts(state, [merge_dir] if merge_dir else None)
+
+    return {"final_output_path": final_path}
+
+
 def audio_video_merger_node(state: VideoGenState) -> dict:
     """
     Merge audio segments with video using ffmpeg.
@@ -869,18 +1380,18 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
 
     if not video_path:
         print("[AUDIO MERGE] No video path provided")
-        return {"final_output_path": None}
+        return _finish_merge(state, None)
 
     valid_audio_segments = [p for p in audio_segments if p and Path(p).exists()]
     print(f"[AUDIO MERGE] Valid audio files: {len(valid_audio_segments)}")
 
     if not valid_audio_segments:
         print("[AUDIO MERGE] No valid audio segments, returning video only")
-        return {"final_output_path": video_path}
+        return _finish_merge(state, video_path)
+
+    temp_dir = tempfile.mkdtemp(prefix="manim_merge_")
 
     try:
-        temp_dir = tempfile.mkdtemp(prefix="manim_merge_")
-
         video_duration = get_video_duration(video_path)
         if video_duration is not None:
             print(f"[AUDIO MERGE] Video duration: {video_duration:.1f}s")
@@ -911,7 +1422,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
 
         if not sections_with_audio:
             print("[AUDIO MERGE] No audio segments within video bounds")
-            return {"final_output_path": video_path}
+            return _finish_merge(state, video_path, temp_dir)
 
         # Sort by timestamp
         sections_with_audio.sort(key=lambda s: s["timestamp"])
@@ -964,7 +1475,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
             processed_path = norm_path
             if clip_dur > window + 0.1:
                 speed_factor = clip_dur / window
-                # atempo only supports 0.5 to 100.0; chain for extreme values
+                # atempo only supports 0.5 to 2.0 per stage; chain for extreme values
                 processed_path = Path(temp_dir) / f"fast_{i:03d}.wav"
                 atempo_filters = _build_atempo_chain(speed_factor)
                 speed_cmd = [
@@ -1005,7 +1516,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
 
         if not concat_pieces:
             print("[AUDIO MERGE] No audio pieces produced")
-            return {"final_output_path": video_path}
+            return _finish_merge(state, video_path, temp_dir)
 
         # 5. Concatenate all pieces into one audio file
         merged_audio = Path(temp_dir) / "merged_audio.wav"
@@ -1029,7 +1540,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
             result = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=60)
             if result.returncode != 0 or not merged_audio.exists():
                 print(f"[AUDIO MERGE] Concat failed: {result.stderr[:200]}")
-                return {"final_output_path": video_path}
+                return _finish_merge(state, video_path, temp_dir)
 
         # Log merged audio duration
         audio_dur = get_video_duration(str(merged_audio), timeout=10)
@@ -1089,23 +1600,16 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
 
         if not final_output.exists():
             print("[AUDIO MERGE] Final output not created")
-            return {"final_output_path": video_path}
+            return _finish_merge(state, video_path, temp_dir)
 
-        # Copy to the project output directory for easy access
-        project_output = Path("output")
-        project_output.mkdir(parents=True, exist_ok=True)
-        output_copy = project_output / f"output_{uuid.uuid4().hex[:8]}.mp4"
-        shutil.copy2(str(final_output), str(output_copy))
-        print(f"[AUDIO MERGE] Copied to: {output_copy.resolve()}")
-
-        print(f"[AUDIO MERGE] Success! Final output: {final_output}")
-        return {"final_output_path": str(final_output)}
+        print(f"[AUDIO MERGE] Merge success: {final_output}")
+        return _finish_merge(state, str(final_output), temp_dir)
 
     except Exception as e:
         print(f"[AUDIO MERGE] Error: {e}")
         import traceback
         traceback.print_exc()
-        return {"final_output_path": video_path}
+        return _finish_merge(state, video_path, temp_dir)
 
 
 def _build_atempo_chain(factor: float) -> str:
@@ -1132,8 +1636,8 @@ def _build_atempo_chain(factor: float) -> str:
 # Conditional Edge Functions
 # ============================================================================
 
-def should_retry_or_continue(state: VideoGenState) -> Literal["recorrector", "render_checker"]:
-    """Decide whether to retry code correction or proceed to render checking."""
+def should_retry_or_continue(state: VideoGenState) -> Literal["recorrector", "visual_qa", "render_checker"]:
+    """Decide whether to retry code correction, review visuals, or proceed."""
     error = state.get("error")
     error_count = state.get("error_count", 0)
     max_retries = state.get("max_retries", 3)
@@ -1144,8 +1648,29 @@ def should_retry_or_continue(state: VideoGenState) -> Literal["recorrector", "re
 
     if error:
         print(f"[RETRY] Max retries ({max_retries}) reached, proceeding to render_checker")
-    else:
-        print("[RETRY] No error, proceeding to render_checker")
+        return "render_checker"
+
+    if state.get("visual_qa_enabled"):
+        print("[RETRY] No error, sending render to visual QA")
+        return "visual_qa"
+
+    print("[RETRY] No error, proceeding to render_checker")
+    return "render_checker"
+
+
+def should_fix_visuals(state: VideoGenState) -> Literal["visual_recorrector", "render_checker"]:
+    """Decide whether the visual QA verdict warrants a layout-fix re-render."""
+    if state.get("visual_acceptable", True):
+        return "render_checker"
+
+    fix_count = state.get("visual_fix_count", 0)
+    max_attempts = get_settings().visual_qa_max_attempts
+
+    if fix_count < max_attempts:
+        print(f"[VISUAL QA] Routing to layout fix (attempt {fix_count + 1}/{max_attempts})")
+        return "visual_recorrector"
+
+    print(f"[VISUAL QA] Fix attempts exhausted ({max_attempts}), proceeding with current render")
     return "render_checker"
 
 

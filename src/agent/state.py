@@ -56,11 +56,17 @@ class VideoGenState(TypedDict):
     explanation_depth: str  # "basic", "detailed", or "comprehensive"
     orientation: str  # "landscape" or "portrait"
     duration_mode: str  # "guide" = soft hint, "strict" = ffmpeg speed adjust
+    render_quality: str  # manim quality flag: l, m, h, p, or k
+    render_fps: Optional[int]  # frame rate override (None = manim default)
     
     # Web research (optional — toggled by the API request)
     web_search_enabled: bool          # Whether to run web research before code gen
     web_context: str                  # Formatted research brief injected into code-gen prompt
     web_sources: list[dict]           # Serialised WebSource list for job metadata
+
+    # Storyboard planning (plan timed sections before writing code)
+    storyboard_enabled: bool
+    storyboard: Optional[list[dict]]  # [{title, duration_seconds, visuals, narration}]
 
     retrieved_examples: list[str]  # Code examples from Graph RAG
     retrieved_context: str  # Formatted context for LLM
@@ -81,19 +87,29 @@ class VideoGenState(TypedDict):
     
     video_valid: bool
     validation_errors: list[str]
+
+    # Visual QA (multimodal frame review of the rendered video)
+    visual_qa_enabled: bool
+    visual_acceptable: bool
+    visual_issues: list[dict]
+    visual_fix_count: Annotated[int, add]  # Layout-fix attempts used
     
     checked_video_path: Optional[str]
     synced_video_path: Optional[str]
     
     audio_segments: list[str]  # Paths to audio files
-    
+
+    temp_dirs: Annotated[list[str], add]  # Per-job temp dirs, removed after final merge
+
     actual_duration: Optional[float]  # Measured duration of rendered video (seconds)
     target_duration: float  # Computed target duration (scene_length * 60)
     duration_adjusted: bool  # Whether video was time-stretched/trimmed
     duration_factor: Optional[float]  # Factor applied to adjust duration
     
     final_output_path: Optional[str]
-    
+
+    pipeline_warnings: Annotated[list[str], add]  # Non-fatal issues surfaced to the user
+
     messages: Annotated[list[dict], add]  # Chat history for debugging
 
 
@@ -107,10 +123,23 @@ def create_initial_state(
     web_search_enabled: bool = False,
     system_message: Optional[str] = None,
     max_retries: Optional[int] = None,
+    render_quality: Optional[str] = None,
+    render_fps: Optional[int] = None,
+    storyboard_enabled: Optional[bool] = None,
+    visual_qa_enabled: Optional[bool] = None,
 ) -> VideoGenState:
     """Create initial state for the workflow."""
+    settings = get_settings()
     if max_retries is None:
-        max_retries = get_settings().max_retries
+        max_retries = settings.max_retries
+    if render_quality is None:
+        render_quality = settings.render_quality
+    if render_fps is None:
+        render_fps = settings.render_fps
+    if storyboard_enabled is None:
+        storyboard_enabled = settings.storyboard_enabled
+    if visual_qa_enabled is None:
+        visual_qa_enabled = settings.visual_qa_enabled
     
     if orientation == "portrait":
         frame_desc = "8 units wide (-4 to +4) and 14.2 units tall (-7.1 to +7.1)"
@@ -177,10 +206,15 @@ def create_initial_state(
         explanation_depth=explanation_depth,
         orientation=orientation,
         duration_mode=duration_mode,
+        render_quality=render_quality,
+        render_fps=render_fps,
 
         web_search_enabled=web_search_enabled,
         web_context="",
         web_sources=[],
+
+        storyboard_enabled=storyboard_enabled,
+        storyboard=None,
 
         retrieved_examples=[],
         retrieved_context="",
@@ -201,18 +235,27 @@ def create_initial_state(
         
         video_valid=False,
         validation_errors=[],
+
+        visual_qa_enabled=visual_qa_enabled,
+        visual_acceptable=True,
+        visual_issues=[],
+        visual_fix_count=0,
         
         checked_video_path=None,
         synced_video_path=None,
         
         audio_segments=[],
-        
+
+        temp_dirs=[],
+
         actual_duration=None,
         target_duration=scene_length * 60.0,
         duration_adjusted=False,
         duration_factor=None,
         
         final_output_path=None,
-        
+
+        pipeline_warnings=[],
+
         messages=[],
     )
