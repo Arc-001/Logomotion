@@ -147,7 +147,7 @@ def main():
         help="Output directory for generated files",
     )
     gen_parser.add_argument(
-        "--depth",
+        "--depth", "-d",
         choices=["basic", "detailed", "comprehensive"],
         help="Explanation depth level (default: from .env or 'detailed')",
     )
