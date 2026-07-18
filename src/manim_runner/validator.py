@@ -1,15 +1,57 @@
 """
-Manim Video Validator.
+Manim Code and Video Validators.
 
-Validates rendered videos for integrity and quality.
-Provides shared helpers for ffprobe operations.
+Validates generated code before rendering (cheap static checks) and
+rendered videos for integrity and quality. Provides shared helpers for
+ffprobe operations.
 """
 
-import subprocess
+import ast
 import json
+import re
+import subprocess
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Optional
+
+
+# Known-fatal legacy/forbidden Manim APIs with actionable replacements.
+_LEGACY_API_PATTERNS = [
+    (r"\bShowCreation\s*\(", "ShowCreation was removed in Manim CE; use Create(...)"),
+    (r"\bTextMobject\s*\(", "TextMobject was removed; use Text(...)"),
+    (r"\bTexMobject\s*\(", "TexMobject was removed; use MathTex(r\"...\")"),
+    (r"\bFadeInFromDown\s*\(", "FadeInFromDown was removed; use FadeIn(..., shift=UP)"),
+    (r"\bCode\s*\(", "Do not use the Code() class; use Text() with a monospace font"),
+]
+
+
+def validate_manim_code(code: str, scene_class_name: str) -> Optional[str]:
+    """
+    Run cheap static checks on generated code before spending a render on it.
+
+    Returns an actionable error message suitable for feeding back to the
+    code corrector, or None when the code looks runnable.
+    """
+    try:
+        ast.parse(code)
+    except SyntaxError as e:
+        offending = (e.text or "").strip()
+        message = f"SyntaxError on line {e.lineno}: {e.msg}"
+        if offending:
+            message += f"\n    {offending}"
+        return message
+
+    if not re.search(rf"\bclass\s+{re.escape(scene_class_name)}\b", code):
+        return f"Scene class '{scene_class_name}' is not defined in the code"
+
+    if "from manim import" not in code and "import manim" not in code:
+        return "Missing manim import (add 'from manim import *')"
+
+    problems = [msg for pattern, msg in _LEGACY_API_PATTERNS if re.search(pattern, code)]
+    if problems:
+        return "Forbidden or removed API usage:\n- " + "\n- ".join(problems)
+
+    return None
 
 
 @dataclass

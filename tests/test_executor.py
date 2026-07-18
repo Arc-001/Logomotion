@@ -187,9 +187,67 @@ class TestQualityConfiguration:
 
         executor = ManimExecutor(quality="h", fps=24)
         monkeypatch.setattr("src.manim_runner.executor.subprocess.run", fake_run)
-        executor.execute("code", "SceneX", orientation="portrait")
+        code = "from manim import *\n\nclass SceneX(Scene):\n    def construct(self):\n        pass\n"
+        executor.execute(code, "SceneX", orientation="portrait")
 
         cmd = recorded["cmd"]
         assert "-qh" in cmd
         assert "--fps" in cmd and cmd[cmd.index("--fps") + 1] == "24"
         assert "--resolution" in cmd and cmd[cmd.index("--resolution") + 1] == "1080,1920"
+
+
+# ============================================================================
+# validate_manim_code (pre-render static validation)
+# ============================================================================
+
+class TestValidateManimCode:
+    def test_valid_code_passes(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = "from manim import *\n\nclass MyScene(Scene):\n    def construct(self):\n        pass\n"
+        assert validate_manim_code(code, "MyScene") is None
+
+    def test_syntax_error_reports_line(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = "from manim import *\nclass MyScene(Scene):\n    def construct(self)\n        pass\n"
+        error = validate_manim_code(code, "MyScene")
+        assert error is not None
+        assert "SyntaxError on line 3" in error
+
+    def test_missing_scene_class(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = "from manim import *\n\nclass OtherScene(Scene):\n    pass\n"
+        error = validate_manim_code(code, "MyScene")
+        assert "MyScene" in error and "not defined" in error
+
+    def test_missing_manim_import(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = "class MyScene:\n    pass\n"
+        error = validate_manim_code(code, "MyScene")
+        assert "manim import" in error
+
+    def test_legacy_api_flagged_with_replacement(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = (
+            "from manim import *\n\nclass MyScene(Scene):\n"
+            "    def construct(self):\n        self.play(ShowCreation(Circle()))\n"
+        )
+        error = validate_manim_code(code, "MyScene")
+        assert "ShowCreation" in error and "Create" in error
+
+    def test_executor_short_circuits_without_subprocess(self, monkeypatch):
+        from src.manim_runner import executor as executor_module
+
+        def _explode(*args, **kwargs):
+            raise AssertionError("subprocess.run must not be called for invalid code")
+
+        monkeypatch.setattr(executor_module.subprocess, "run", _explode)
+        result = ManimExecutor().execute("def broken(:", "MyScene")
+
+        assert result.success is False
+        assert "SyntaxError" in result.error
+        assert result.code_path == ""
