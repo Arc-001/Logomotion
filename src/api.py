@@ -15,7 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
-from .config import get_settings
+from .config import get_settings, normalize_render_quality
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -70,6 +70,16 @@ class GenerateRequest(BaseModel):
         default=False,
         description="Fetch latest web / Wikipedia data before generating the animation",
     )
+    quality: Optional[Literal["low", "medium", "high", "l", "m", "h", "p", "k"]] = Field(
+        default=None,
+        description="Render quality (default from settings; low ≈ 480p, medium ≈ 720p, high ≈ 1080p)",
+    )
+    fps: Optional[int] = Field(
+        default=None,
+        ge=5,
+        le=60,
+        description="Frame rate override (default: manim's default for the quality)",
+    )
 
     @model_validator(mode="after")
     def apply_defaults_and_validate(self):
@@ -86,6 +96,10 @@ class GenerateRequest(BaseModel):
             self.orientation = settings.video_orientation
         if self.duration_mode is None:
             self.duration_mode = settings.duration_mode
+        if self.quality is None:
+            self.quality = settings.render_quality
+        else:
+            self.quality = normalize_render_quality(self.quality)
         return self
 
 
@@ -166,6 +180,8 @@ async def generate_video(request: GenerateRequest, background_tasks: BackgroundT
         request.orientation,
         request.duration_mode,
         request.web_search,
+        request.quality,
+        request.fps,
     )
 
     return GenerateResponse(
@@ -245,6 +261,8 @@ async def _run_generation_job(
     orientation: str,
     duration_mode: str,
     web_search: bool = False,
+    quality: Optional[str] = None,
+    fps: Optional[int] = None,
 ):
     """Background task to run video generation."""
     from .agent.graph import generate_video
@@ -260,6 +278,8 @@ async def _run_generation_job(
             orientation=orientation,
             duration_mode=duration_mode,
             web_search_enabled=web_search,
+            render_quality=quality,
+            render_fps=fps,
         )
 
         video_path = result.get("final_output_path") or result.get("rendered_video_path")

@@ -56,6 +56,8 @@ class VideoGenState(TypedDict):
     explanation_depth: str  # "basic", "detailed", or "comprehensive"
     orientation: str  # "landscape" or "portrait"
     duration_mode: str  # "guide" = soft hint, "strict" = ffmpeg speed adjust
+    render_quality: str  # manim quality flag: l, m, h, p, or k
+    render_fps: Optional[int]  # frame rate override (None = manim default)
     
     # Web research (optional — toggled by the API request)
     web_search_enabled: bool          # Whether to run web research before code gen
@@ -111,10 +113,17 @@ def create_initial_state(
     web_search_enabled: bool = False,
     system_message: Optional[str] = None,
     max_retries: Optional[int] = None,
+    render_quality: Optional[str] = None,
+    render_fps: Optional[int] = None,
 ) -> VideoGenState:
     """Create initial state for the workflow."""
+    settings = get_settings()
     if max_retries is None:
-        max_retries = get_settings().max_retries
+        max_retries = settings.max_retries
+    if render_quality is None:
+        render_quality = settings.render_quality
+    if render_fps is None:
+        render_fps = settings.render_fps
     
     if orientation == "portrait":
         frame_desc = "8 units wide (-4 to +4) and 14.2 units tall (-7.1 to +7.1)"
@@ -181,6 +190,8 @@ def create_initial_state(
         explanation_depth=explanation_depth,
         orientation=orientation,
         duration_mode=duration_mode,
+        render_quality=render_quality,
+        render_fps=render_fps,
 
         web_search_enabled=web_search_enabled,
         web_context="",

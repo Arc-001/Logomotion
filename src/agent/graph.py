@@ -148,10 +148,12 @@ async def generate_video(
     duration_mode: str = "guide",
     web_search_enabled: bool = False,
     system_message: str = None,
+    render_quality: str = None,
+    render_fps: int = None,
 ) -> dict:
     """
     Generate a Manim video from a description.
-    
+
     Args:
         scene_title: Title of the scene
         scene_prompt_description: Natural language description
@@ -161,7 +163,9 @@ async def generate_video(
         duration_mode: 'guide' = soft hint (default), 'strict' = ffmpeg speed adjust
         web_search_enabled: Fetch latest web/Wikipedia data before generating
         system_message: Optional custom system prompt
-    
+        render_quality: Manim quality flag l/m/h/p/k (default from settings)
+        render_fps: Frame rate override (default: manim's default for the quality)
+
     Returns:
         Final state dict with paths to generated files
     """
@@ -174,6 +178,8 @@ async def generate_video(
         duration_mode=duration_mode,
         web_search_enabled=web_search_enabled,
         system_message=system_message,
+        render_quality=render_quality,
+        render_fps=render_fps,
     )
     
     compiled_graph = get_graph()
@@ -192,10 +198,12 @@ def generate_video_sync(
     duration_mode: str = "guide",
     web_search_enabled: bool = False,
     system_message: str = None,
+    render_quality: str = None,
+    render_fps: int = None,
 ) -> dict:
     """Synchronous version of generate_video."""
     import asyncio
-    
+
     return asyncio.run(generate_video(
         scene_title=scene_title,
         scene_prompt_description=scene_prompt_description,
@@ -205,4 +213,6 @@ def generate_video_sync(
         duration_mode=duration_mode,
         web_search_enabled=web_search_enabled,
         system_message=system_message,
+        render_quality=render_quality,
+        render_fps=render_fps,
     ))

@@ -9,6 +9,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from src.manim_runner.executor import ManimExecutor, ExecutionResult
 
 
@@ -144,3 +146,50 @@ class TestCleanup:
             assert Path(temp_dir).exists()
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+# ============================================================================
+# Quality / fps configuration
+# ============================================================================
+
+class TestQualityConfiguration:
+    def test_normalize_render_quality(self):
+        from src.config import normalize_render_quality
+
+        assert normalize_render_quality("low") == "l"
+        assert normalize_render_quality("Medium") == "m"
+        assert normalize_render_quality("HIGH") == "h"
+        assert normalize_render_quality("m") == "m"
+        assert normalize_render_quality("k") == "k"
+        with pytest.raises(ValueError):
+            normalize_render_quality("ultra")
+
+    def test_portrait_resolution_tracks_quality(self):
+        from src.manim_runner.executor import _PORTRAIT_RESOLUTIONS
+
+        assert _PORTRAIT_RESOLUTIONS["l"] == "480,854"
+        assert _PORTRAIT_RESOLUTIONS["m"] == "720,1280"
+        assert _PORTRAIT_RESOLUTIONS["h"] == "1080,1920"
+
+    def test_executor_render_command_includes_quality_and_fps(self, monkeypatch, tmp_path):
+        """Build the render command via execute() with subprocess mocked out."""
+        recorded = {}
+
+        def fake_run(cmd, **kwargs):
+            recorded["cmd"] = cmd
+
+            class _R:
+                returncode = 1
+                stdout = ""
+                stderr = "Error: stop here"
+
+            return _R()
+
+        executor = ManimExecutor(quality="h", fps=24)
+        monkeypatch.setattr("src.manim_runner.executor.subprocess.run", fake_run)
+        executor.execute("code", "SceneX", orientation="portrait")
+
+        cmd = recorded["cmd"]
+        assert "-qh" in cmd
+        assert "--fps" in cmd and cmd[cmd.index("--fps") + 1] == "24"
+        assert "--resolution" in cmd and cmd[cmd.index("--resolution") + 1] == "1080,1920"
