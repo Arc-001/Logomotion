@@ -80,6 +80,10 @@ class GenerateRequest(BaseModel):
         le=60,
         description="Frame rate override (default: manim's default for the quality)",
     )
+    visual_qa: Optional[bool] = Field(
+        default=None,
+        description="Review rendered frames with the multimodal LLM and auto-fix layout problems (adds latency)",
+    )
 
     @model_validator(mode="after")
     def apply_defaults_and_validate(self):
@@ -100,6 +104,8 @@ class GenerateRequest(BaseModel):
             self.quality = settings.render_quality
         else:
             self.quality = normalize_render_quality(self.quality)
+        if self.visual_qa is None:
+            self.visual_qa = settings.visual_qa_enabled
         return self
 
 
@@ -182,6 +188,7 @@ async def generate_video(request: GenerateRequest, background_tasks: BackgroundT
         request.web_search,
         request.quality,
         request.fps,
+        request.visual_qa,
     )
 
     return GenerateResponse(
@@ -263,6 +270,7 @@ async def _run_generation_job(
     web_search: bool = False,
     quality: Optional[str] = None,
     fps: Optional[int] = None,
+    visual_qa: Optional[bool] = None,
 ):
     """Background task to run video generation."""
     from .agent.graph import generate_video
@@ -280,6 +288,7 @@ async def _run_generation_job(
             web_search_enabled=web_search,
             render_quality=quality,
             render_fps=fps,
+            visual_qa=visual_qa,
         )
 
         video_path = result.get("final_output_path") or result.get("rendered_video_path")

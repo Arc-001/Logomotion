@@ -16,8 +16,11 @@ from .nodes import (
     audio_video_merger_node,
     web_research_node,
     storyboard_node,
+    visual_qa_node,
+    visual_recorrector_node,
     should_retry_or_continue,
     should_fix_duration,
+    should_fix_visuals,
 )
 
 
@@ -62,6 +65,8 @@ def build_video_gen_graph() -> StateGraph:
     builder.add_node("video_code_gen", video_code_gen_node)
     builder.add_node("code_executor", code_executor_node)
     builder.add_node("recorrector", recorrector_node)
+    builder.add_node("visual_qa", visual_qa_node)
+    builder.add_node("visual_recorrector", visual_recorrector_node)
     builder.add_node("transcript_processor", transcript_processor_node)
     builder.add_node("render_checker", render_checker_node)
     builder.add_node("video_duration_fixer", video_duration_fixer_node)
@@ -109,11 +114,24 @@ def build_video_gen_graph() -> StateGraph:
         should_retry_or_continue,
         {
             "recorrector": "recorrector",
+            "visual_qa": "visual_qa",
             "render_checker": "render_checker",
         }
     )
-    
+
     builder.add_edge("recorrector", "code_executor")
+
+    # Visual QA: fix layout and re-render (capped), or accept and continue
+    builder.add_conditional_edges(
+        "visual_qa",
+        should_fix_visuals,
+        {
+            "visual_recorrector": "visual_recorrector",
+            "render_checker": "render_checker",
+        }
+    )
+
+    builder.add_edge("visual_recorrector", "code_executor")
     
     # Barrier join for the audio and video branches. Joining both branches
     # directly on `synchronizer` made LangGraph run it (and the merger) once
@@ -169,6 +187,7 @@ async def generate_video(
     system_message: str = None,
     render_quality: str = None,
     render_fps: int = None,
+    visual_qa: bool = None,
 ) -> dict:
     """
     Generate a Manim video from a description.
@@ -184,6 +203,8 @@ async def generate_video(
         system_message: Optional custom system prompt
         render_quality: Manim quality flag l/m/h/p/k (default from settings)
         render_fps: Frame rate override (default: manim's default for the quality)
+        visual_qa: Review rendered frames with the multimodal LLM and fix
+            layout problems (default from settings; adds latency and cost)
 
     Returns:
         Final state dict with paths to generated files
@@ -199,6 +220,7 @@ async def generate_video(
         system_message=system_message,
         render_quality=render_quality,
         render_fps=render_fps,
+        visual_qa_enabled=visual_qa,
     )
     
     compiled_graph = get_graph()
@@ -219,6 +241,7 @@ def generate_video_sync(
     system_message: str = None,
     render_quality: str = None,
     render_fps: int = None,
+    visual_qa: bool = None,
 ) -> dict:
     """Synchronous version of generate_video."""
     import asyncio
@@ -234,4 +257,5 @@ def generate_video_sync(
         system_message=system_message,
         render_quality=render_quality,
         render_fps=render_fps,
+        visual_qa=visual_qa,
     ))

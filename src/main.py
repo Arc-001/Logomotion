@@ -47,6 +47,7 @@ def cmd_generate(args):
     duration_mode = args.duration_mode or settings.duration_mode
     render_quality = normalize_render_quality(args.quality) if args.quality else settings.render_quality
     render_fps = args.fps or settings.render_fps
+    visual_qa = True if args.visual_qa else None  # None = default from settings
 
     print(f"[CONFIG] Scene length: {scene_length} minutes ({scene_length * 60} seconds)")
     print(f"[CONFIG] Explanation depth: {explanation_depth}")
@@ -63,6 +64,7 @@ def cmd_generate(args):
         duration_mode=duration_mode,
         render_quality=render_quality,
         render_fps=render_fps,
+        visual_qa=visual_qa,
     )
 
     if result.get("final_output_path"):
@@ -173,6 +175,12 @@ def main():
         type=int,
         default=None,
         help="Frame rate override (default: manim's default for the quality)",
+    )
+    gen_parser.add_argument(
+        "--visual-qa",
+        action="store_true",
+        dest="visual_qa",
+        help="Review rendered frames with the multimodal LLM and auto-fix layout problems",
     )
 
     serve_parser = subparsers.add_parser("serve", help="Start the API server")

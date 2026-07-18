@@ -865,6 +865,190 @@ def transcript_processor_node(state: VideoGenState) -> dict:
 
 
 # ============================================================================
+# NODE 4b: Visual QA (optional — multimodal review of rendered frames)
+# ============================================================================
+
+def _encode_image_data_url(path: str) -> str:
+    """Base64-encode a JPEG frame as a data URL for a multimodal message."""
+    import base64
+
+    with open(path, "rb") as f:
+        encoded = base64.b64encode(f.read()).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def _parse_visual_verdict(response_text: str) -> Optional[dict]:
+    """Extract the {"acceptable": ..., "issues": [...]} verdict JSON."""
+    fence_match = re.search(r"```(?:json)?\s*\n(.*?)```", response_text, re.DOTALL)
+    raw = fence_match.group(1) if fence_match else response_text
+
+    data = json.loads(raw)
+    if not isinstance(data, dict) or "acceptable" not in data:
+        return None
+
+    issues = data.get("issues") or []
+    if not isinstance(issues, list):
+        issues = []
+    return {"acceptable": bool(data["acceptable"]), "issues": [i for i in issues if isinstance(i, dict)]}
+
+
+def visual_qa_node(state: VideoGenState) -> dict:
+    """
+    Review frames sampled from the rendered video with the multimodal LLM.
+
+    Detects layout problems the prompt rules cannot guarantee: overlapping
+    elements, off-frame content, empty screens, unreadable text. This is the
+    only stage that actually looks at the produced pixels.
+
+    Input: rendered_video_path
+    Output: visual_acceptable, visual_issues
+    """
+    from ..manim_runner.frames import extract_frames
+
+    video_path = state.get("rendered_video_path")
+    settings = get_settings()
+
+    if not video_path or not Path(video_path).exists():
+        print("[VISUAL QA] No rendered video to review, skipping")
+        return {"visual_acceptable": True, "visual_issues": []}
+
+    frames = extract_frames(video_path, count=settings.visual_qa_frames)
+    if not frames:
+        print("[VISUAL QA] Frame extraction failed, skipping review")
+        return {
+            "visual_acceptable": True,
+            "visual_issues": [],
+            "pipeline_warnings": ["Visual QA skipped: frame extraction failed"],
+        }
+
+    frame_dirs = list({str(Path(f["path"]).parent) for f in frames})
+    timestamps = ", ".join(f"frame {i} at {f['timestamp']}s" for i, f in enumerate(frames))
+
+    instruction = f"""You are reviewing frames sampled from a rendered Manim educational animation.
+
+Frames in order: {timestamps}.
+
+Check every frame for layout problems a viewer would notice:
+- overlapping text or shapes (elements rendered on top of each other)
+- content cut off at the frame edge or fully off-frame
+- empty or near-empty frames (a brief transition frame is fine)
+- unreadable text (too small, or low contrast against the background)
+
+Respond with STRICT JSON only — no prose, no markdown fences:
+{{"acceptable": true, "issues": [{{"frame_index": 0, "timestamp": 0.0, "problem": "...", "fix": "..."}}]}}
+
+Set "acceptable" to false only when at least one clear problem exists.
+Each "fix" must be a concrete, code-level suggestion (e.g. "FadeOut the bullet list before showing the diagram", "scale the equation with scale_to_fit_width")."""
+
+    content = [{"type": "text", "text": instruction}]
+    for frame in frames:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": _encode_image_data_url(frame["path"])},
+        })
+
+    response_text = llm_chat([{"role": "user", "content": content}], temperature=0.1)
+
+    verdict = None
+    if response_text:
+        try:
+            verdict = _parse_visual_verdict(response_text)
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            print(f"[VISUAL QA] Could not parse verdict: {e}")
+
+    if verdict is None:
+        # QA must never block the pipeline
+        print("[VISUAL QA] Review unavailable, accepting video as-is")
+        return {
+            "visual_acceptable": True,
+            "visual_issues": [],
+            "temp_dirs": frame_dirs,
+            "pipeline_warnings": ["Visual QA review failed, video accepted unreviewed"],
+        }
+
+    if verdict["acceptable"]:
+        print("[VISUAL QA] Verdict: acceptable")
+        return {"visual_acceptable": True, "visual_issues": [], "temp_dirs": frame_dirs}
+
+    print(f"[VISUAL QA] Verdict: {len(verdict['issues'])} issue(s) found")
+    for issue in verdict["issues"]:
+        print(f"[VISUAL QA]   - {issue.get('timestamp', '?')}s: {issue.get('problem', '')}")
+
+    result: dict = {
+        "visual_acceptable": False,
+        "visual_issues": verdict["issues"],
+        "temp_dirs": frame_dirs,
+    }
+
+    fix_count = state.get("visual_fix_count", 0)
+    if fix_count >= get_settings().visual_qa_max_attempts:
+        # Out of fix attempts — surface the remaining issues instead
+        problems = "; ".join(str(i.get("problem", "")) for i in verdict["issues"][:3])
+        result["pipeline_warnings"] = [f"Visual issues remain after fixes: {problems}"]
+
+    return result
+
+
+def visual_recorrector_node(state: VideoGenState) -> dict:
+    """
+    Fix layout problems reported by visual QA without touching timings.
+
+    Input: code, visual_issues
+    Output: corrected code, visual_fix_count incremented
+    """
+    issues = state.get("visual_issues", [])
+    print(f"[VISUAL FIX] Attempting layout fix for {len(issues)} issue(s)")
+
+    issue_lines = "\n".join(
+        f"{i + 1}. At ~{issue.get('timestamp', '?')}s: {issue.get('problem', '')}\n"
+        f"   Suggested fix: {issue.get('fix', '')}"
+        for i, issue in enumerate(issues)
+    )
+
+    messages = [
+        {"role": "system", "content": """You are an expert at fixing layout problems in Manim v0.18+ code.
+
+A visual review of the RENDERED video found concrete layout problems. Fix ONLY those.
+
+LAYOUT RULES:
+- Clear the screen before new topics: self.play(FadeOut(Group(*self.mobjects)))
+- Position relative to edges/objects: .to_edge(...), .next_to(...), .move_to(ORIGIN)
+- Scale groups to fit: group.scale_to_fit_width(min(group.width, config.frame_width - 2))
+
+CRITICAL TIMING RULE:
+- DO NOT change the overall duration, the number of animations, run_time, or self.wait() times. The narration audio has already been generated from the original timings; changing them desynchronizes the audio. ONLY fix the layout.
+
+Return ONLY the corrected Python code."""},
+        {"role": "user", "content": f"""The following Manim code rendered successfully, but reviewing the video found these layout problems:
+
+{issue_lines}
+
+```python
+{state["code"]}
+```
+
+Fix the layout problems and return the complete corrected code. Only return Python code, nothing else."""},
+    ]
+
+    fixed_code = llm_chat(messages, temperature=0.1)
+
+    if not fixed_code:
+        print("[VISUAL FIX] LLM unavailable, keeping current code")
+        return {
+            "visual_fix_count": 1,
+            "error": None,
+            "pipeline_warnings": ["Visual layout fix failed (LLM unavailable)"],
+        }
+
+    return {
+        "code": _extract_code_block(fixed_code).strip(),
+        "visual_fix_count": 1,
+        "error": None,
+        "messages": [{"role": "assistant", "content": "Fixed layout based on visual QA feedback"}],
+    }
+
+
+# ============================================================================
 # NODE 5: Render Checker
 # ============================================================================
 
@@ -1119,7 +1303,7 @@ def synchronizer_node(state: VideoGenState) -> dict:
 # NODE 7: Audio Video Merger (with ffmpeg)
 # ============================================================================
 
-_TEMP_PREFIXES = ("manim_exec_", "manim_durfix_", "manim_merge_", "kokoro_")
+_TEMP_PREFIXES = ("manim_exec_", "manim_durfix_", "manim_merge_", "manim_frames_", "kokoro_")
 
 
 def _cleanup_temp_artifacts(state: VideoGenState, extra_dirs: Optional[list] = None) -> None:
@@ -1452,8 +1636,8 @@ def _build_atempo_chain(factor: float) -> str:
 # Conditional Edge Functions
 # ============================================================================
 
-def should_retry_or_continue(state: VideoGenState) -> Literal["recorrector", "render_checker"]:
-    """Decide whether to retry code correction or proceed to render checking."""
+def should_retry_or_continue(state: VideoGenState) -> Literal["recorrector", "visual_qa", "render_checker"]:
+    """Decide whether to retry code correction, review visuals, or proceed."""
     error = state.get("error")
     error_count = state.get("error_count", 0)
     max_retries = state.get("max_retries", 3)
@@ -1464,8 +1648,29 @@ def should_retry_or_continue(state: VideoGenState) -> Literal["recorrector", "re
 
     if error:
         print(f"[RETRY] Max retries ({max_retries}) reached, proceeding to render_checker")
-    else:
-        print("[RETRY] No error, proceeding to render_checker")
+        return "render_checker"
+
+    if state.get("visual_qa_enabled"):
+        print("[RETRY] No error, sending render to visual QA")
+        return "visual_qa"
+
+    print("[RETRY] No error, proceeding to render_checker")
+    return "render_checker"
+
+
+def should_fix_visuals(state: VideoGenState) -> Literal["visual_recorrector", "render_checker"]:
+    """Decide whether the visual QA verdict warrants a layout-fix re-render."""
+    if state.get("visual_acceptable", True):
+        return "render_checker"
+
+    fix_count = state.get("visual_fix_count", 0)
+    max_attempts = get_settings().visual_qa_max_attempts
+
+    if fix_count < max_attempts:
+        print(f"[VISUAL QA] Routing to layout fix (attempt {fix_count + 1}/{max_attempts})")
+        return "visual_recorrector"
+
+    print(f"[VISUAL QA] Fix attempts exhausted ({max_attempts}), proceeding with current render")
     return "render_checker"
 
 

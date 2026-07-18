@@ -606,3 +606,147 @@ class TestStoryboardPromptInjection:
         assert "STORYBOARD" in prompt
         assert "[0s–10s] Intro" in prompt
         assert "[10s–30s] Wrap" in prompt
+
+
+# ============================================================================
+# Visual QA
+# ============================================================================
+
+VERDICT_BAD = (
+    '{"acceptable": false, "issues": ['
+    '{"frame_index": 1, "timestamp": 5.0, "problem": "title overlaps diagram", '
+    '"fix": "FadeOut the title before showing the diagram"}]}'
+)
+
+
+class TestVisualQaRouting:
+    def test_no_error_with_qa_enabled_routes_to_visual_qa(self):
+        assert should_retry_or_continue({"error": None, "visual_qa_enabled": True}) == "visual_qa"
+
+    def test_no_error_without_qa_routes_to_render_checker(self):
+        assert should_retry_or_continue({"error": None}) == "render_checker"
+
+    def test_error_still_routes_to_recorrector_first(self):
+        state = {"error": "boom", "error_count": 0, "max_retries": 3, "visual_qa_enabled": True}
+        assert should_retry_or_continue(state) == "recorrector"
+
+    def test_acceptable_video_proceeds(self):
+        from src.agent.nodes import should_fix_visuals
+
+        assert should_fix_visuals({"visual_acceptable": True}) == "render_checker"
+
+    def test_unacceptable_video_routes_to_fix_until_cap(self):
+        from src.agent.nodes import should_fix_visuals
+
+        state = {"visual_acceptable": False, "visual_fix_count": 0}
+        assert should_fix_visuals(state) == "visual_recorrector"
+
+        state["visual_fix_count"] = 99
+        assert should_fix_visuals(state) == "render_checker"
+
+
+class TestParseVisualVerdict:
+    def test_parses_verdict(self):
+        from src.agent.nodes import _parse_visual_verdict
+
+        verdict = _parse_visual_verdict(VERDICT_BAD)
+        assert verdict["acceptable"] is False
+        assert len(verdict["issues"]) == 1
+        assert "overlaps" in verdict["issues"][0]["problem"]
+
+    def test_parses_fenced_verdict(self):
+        from src.agent.nodes import _parse_visual_verdict
+
+        verdict = _parse_visual_verdict(f"```json\n{VERDICT_BAD}\n```")
+        assert verdict["acceptable"] is False
+
+    def test_missing_acceptable_key_returns_none(self):
+        from src.agent.nodes import _parse_visual_verdict
+
+        assert _parse_visual_verdict('{"issues": []}') is None
+
+    def test_malformed_json_raises(self):
+        import json as json_module
+
+        from src.agent.nodes import _parse_visual_verdict
+
+        with pytest.raises(json_module.JSONDecodeError):
+            _parse_visual_verdict("not json")
+
+
+class TestVisualQaNode:
+    def test_missing_video_accepts_without_review(self):
+        from src.agent.nodes import visual_qa_node
+
+        result = visual_qa_node({"rendered_video_path": None})
+        assert result["visual_acceptable"] is True
+
+    def test_verdict_flows_through(self, monkeypatch, tmp_path):
+        from src.agent import nodes
+
+        video = tmp_path / "video.mp4"
+        video.write_bytes(b"x" * 2000)
+        frame = tmp_path / "frame_00.jpg"
+        frame.write_bytes(b"\xff\xd8\xff\xe0fakejpg")
+
+        monkeypatch.setattr(
+            "src.manim_runner.frames.extract_frames",
+            lambda path, count=6, out_dir=None: [{"path": str(frame), "timestamp": 1.0}],
+        )
+        monkeypatch.setattr(nodes, "llm_chat", lambda messages, temperature=0.1: VERDICT_BAD)
+
+        result = nodes.visual_qa_node({"rendered_video_path": str(video), "visual_fix_count": 0})
+
+        assert result["visual_acceptable"] is False
+        assert len(result["visual_issues"]) == 1
+
+    def test_llm_failure_never_blocks_pipeline(self, monkeypatch, tmp_path):
+        from src.agent import nodes
+
+        video = tmp_path / "video.mp4"
+        video.write_bytes(b"x" * 2000)
+        frame = tmp_path / "frame_00.jpg"
+        frame.write_bytes(b"\xff\xd8\xff\xe0fakejpg")
+
+        monkeypatch.setattr(
+            "src.manim_runner.frames.extract_frames",
+            lambda path, count=6, out_dir=None: [{"path": str(frame), "timestamp": 1.0}],
+        )
+        monkeypatch.setattr(nodes, "llm_chat", lambda messages, temperature=0.1: None)
+
+        result = nodes.visual_qa_node({"rendered_video_path": str(video)})
+
+        assert result["visual_acceptable"] is True
+        assert any("unreviewed" in w for w in result["pipeline_warnings"])
+
+
+class TestVisualRecorrectorNode:
+    def test_fixes_code_and_increments_count(self, monkeypatch):
+        from src.agent.nodes import visual_recorrector_node
+
+        monkeypatch.setattr(
+            "src.agent.nodes.llm_chat",
+            lambda messages, temperature=0.1: "```python\nfixed_layout = True\n```",
+        )
+        state = {
+            "code": "original = True",
+            "visual_issues": [{"timestamp": 5.0, "problem": "overlap", "fix": "FadeOut first"}],
+        }
+
+        result = visual_recorrector_node(state)
+
+        assert result["code"] == "fixed_layout = True"
+        assert result["visual_fix_count"] == 1
+        assert result["error"] is None
+
+    def test_llm_failure_keeps_code_with_warning(self, monkeypatch):
+        from src.agent.nodes import visual_recorrector_node
+
+        monkeypatch.setattr("src.agent.nodes.llm_chat", lambda messages, temperature=0.1: None)
+        state = {"code": "original = True", "visual_issues": []}
+
+        result = visual_recorrector_node(state)
+
+        assert "code" not in result  # state code untouched
+        assert result["visual_fix_count"] == 1
+        assert any("fix failed" in w for w in result["pipeline_warnings"])
