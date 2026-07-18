@@ -218,8 +218,8 @@ def _wikipedia_search(query: str, max_pages: int = 2) -> list[WebSource]:
                         source_type="wikipedia",
                     )
                 )
-            except Exception:
-                pass  # Swallow per-page errors silently
+            except Exception as exc:
+                print(f"[WebResearch] Wikipedia page '{title}' fetch failed: {exc}")
 
     except Exception as exc:
         print(f"[WebResearch] Wikipedia search failed for '{query}': {exc}")

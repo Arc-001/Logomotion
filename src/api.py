@@ -103,6 +103,7 @@ class JobStatus(BaseModel):
     video_path: Optional[str] = None
     code: Optional[str] = None
     error: Optional[str] = None
+    warnings: Optional[list[str]] = None  # non-fatal pipeline issues
     web_sources: Optional[list] = None  # populated when web_search was used
 
 
@@ -262,6 +263,7 @@ async def _run_generation_job(
         )
 
         video_path = result.get("final_output_path") or result.get("rendered_video_path")
+        warnings = result.get("pipeline_warnings") or None
 
         if video_path:
             jobs[job_id] = JobStatus(
@@ -269,13 +271,18 @@ async def _run_generation_job(
                 status="completed",
                 video_path=video_path,
                 code=result.get("code"),
+                warnings=warnings,
                 web_sources=result.get("web_sources") or None,
             )
         else:
+            error = result.get("error")
+            if not error and warnings:
+                error = "; ".join(warnings)
             jobs[job_id] = JobStatus(
                 job_id=job_id,
                 status="failed",
-                error=result.get("error", "Unknown error"),
+                error=error or "Unknown error",
+                warnings=warnings,
             )
     except Exception as e:
         jobs[job_id] = JobStatus(
