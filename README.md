@@ -86,19 +86,52 @@ flowchart TD
 
 ## Quickstart
 
+### First start, step by step
+
 ```bash
+# 1. Clone and enter the repo
 git clone https://github.com/Arc-001/Logomotion.git
 cd Logomotion
-./start.sh install     # venv + deps + .env template
-# edit .env: add your OpenRouter API key
-./start.sh start       # Neo4j up (auto-seeded) + API server
+
+# 2. Install: creates the venv, installs Python deps, copies .env.example to .env
+./start.sh install
+
+# 3. Add your key: open .env and set OPENROUTER_API_KEY=<your key>
+#    (everything else has working defaults)
+
+# 4. Start: pulls the Neo4j image, seeds it from the bundled dump
+#    (~1200 examples, first run only), and launches the API server
+./start.sh start
+
+# 5. Open http://localhost:8000 and generate your first video
 ```
 
-Or skip straight to containers:
+That is the whole setup — step 4 handles the database, the seeding, and the server in one command. The first `start` takes a minute longer than usual because of the image pull and the dump load; every start after that skips both.
+
+Prefer everything in containers instead? Two commands:
 
 ```bash
 ./start.sh install --docker
 ./start.sh start --docker
+```
+
+### Starting, day to day
+
+```bash
+./start.sh start                # bring everything up (Neo4j + API + web UI)
+# Ctrl+C stops the server; containers keep running
+./start.sh stop                 # stop the containers too (data survives)
+```
+
+Useful variations:
+
+```bash
+PORT=8010 ./start.sh start      # port 8000 taken? run the API elsewhere
+PORT=8010 ./start.sh dev        # Vite dev server with hot reload at :5173,
+                                # proxying /api to the backend port
+./start.sh seed --force         # wipe the knowledge base and reload the dump
+./start.sh logs                 # follow container logs
+./start.sh status               # what is running
 ```
 
 One script drives the entire lifecycle:
