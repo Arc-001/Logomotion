@@ -4,9 +4,10 @@ OpenRouter Embedding Function for ChromaDB.
 Uses OpenRouter's embedding API with Google's Gemini embedding model.
 """
 
-import os
 import requests
 from typing import List
+
+from ..config import get_settings
 
 try:
     from chromadb import EmbeddingFunction, Documents, Embeddings
@@ -29,11 +30,12 @@ class OpenRouterEmbeddingFunction(EmbeddingFunction):
         self,
         api_key: str = None,
         model: str = "google/gemini-embedding-001",
-        base_url: str = "https://openrouter.ai/api/v1",
+        base_url: str = None,
     ):
-        self.api_key = api_key or os.getenv("OPENROUTER_API_KEY")
+        settings = get_settings()
+        self.api_key = api_key or settings.openrouter_api_key
         self.model = model
-        self.base_url = base_url.rstrip("/")
+        self.base_url = (base_url or settings.openrouter_base_url).rstrip("/")
         
         if not self.api_key:
             raise ValueError("OPENROUTER_API_KEY not found in environment")

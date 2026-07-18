@@ -20,17 +20,9 @@ from .config import get_settings
 
 def cmd_index(args):
     """Index the Manim dataset."""
-    from .graph_rag.indexer import ManimIndexer, IndexerConfig
+    from .graph_rag.indexer import ManimIndexer
 
-    settings = get_settings()
-    config = IndexerConfig(
-        neo4j_uri=settings.neo4j_uri,
-        neo4j_user=settings.neo4j_user,
-        neo4j_password=settings.neo4j_password,
-        chroma_persist_dir=settings.chroma_persist_dir,
-    )
-
-    indexer = ManimIndexer(config)
+    indexer = ManimIndexer()
     try:
         count = indexer.index_directory(args.data)
         print(f"\n✓ Successfully indexed {count} examples")

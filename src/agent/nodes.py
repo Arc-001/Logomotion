@@ -964,7 +964,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
             processed_path = norm_path
             if clip_dur > window + 0.1:
                 speed_factor = clip_dur / window
-                # atempo only supports 0.5 to 100.0; chain for extreme values
+                # atempo only supports 0.5 to 2.0 per stage; chain for extreme values
                 processed_path = Path(temp_dir) / f"fast_{i:03d}.wav"
                 atempo_filters = _build_atempo_chain(speed_factor)
                 speed_cmd = [

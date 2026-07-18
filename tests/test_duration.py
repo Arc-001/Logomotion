@@ -9,7 +9,6 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -43,19 +42,6 @@ class TestRenderCheckerDuration:
         """Video significantly longer than target should be flagged."""
         video_path = os.path.join(temp_dir, "long.mp4")
         assert create_test_video(10.0, video_path), "Failed to create test video"
-
-        # Import locally to avoid neo4j dependency at module level
-        import importlib
-        import types
-
-        # Mock the problematic imports
-        nodes_code = Path("/home/arc/repo/Logomotion/src/agent/nodes.py").read_text()
-
-        state = {
-            "rendered_video_path": video_path,
-            "scene_length": 0.05,  # 3 seconds target
-            "target_duration": 3.0,
-        }
 
         # Use ffprobe directly to verify duration detection works
         actual = get_video_duration(video_path)
