@@ -472,6 +472,8 @@ def code_executor_node(state: VideoGenState) -> dict:
         orientation=orientation,
     )
 
+    exec_temp_dir = str(Path(result.code_path).parent)
+
     if result.success:
         print(f"[EXECUTOR] Render SUCCESS: {result.video_path}")
         return {
@@ -479,6 +481,7 @@ def code_executor_node(state: VideoGenState) -> dict:
             "error": None,
             "render_logs": f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}",
             "temp_code_path": result.code_path,
+            "temp_dirs": [exec_temp_dir],
         }
 
     print(f"[EXECUTOR] Render FAILED: {(result.error or '')[:200]}...")
@@ -487,6 +490,7 @@ def code_executor_node(state: VideoGenState) -> dict:
         "error_count": 1,
         "render_logs": f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}",
         "temp_code_path": result.code_path,
+        "temp_dirs": [exec_temp_dir],
     }
 
 
@@ -741,8 +745,9 @@ def video_duration_fixer_node(state: VideoGenState) -> dict:
     action = "speeding up" if ratio > 1.0 else "slowing down"
     print(f"[DURATION FIX] Video is {direction} ({original_duration:.1f}s vs {target_duration:.1f}s) — {action} (setpts={pts_factor:.4f}*PTS)")
 
+    temp_dir = tempfile.mkdtemp(prefix="manim_durfix_")
+
     try:
-        temp_dir = tempfile.mkdtemp(prefix="manim_durfix_")
         adjusted_path = Path(temp_dir) / "duration_adjusted.mp4"
 
         cmd = [
@@ -758,11 +763,11 @@ def video_duration_fixer_node(state: VideoGenState) -> dict:
 
         if result.returncode != 0:
             print(f"[DURATION FIX] ffmpeg failed: {result.stderr[:300]}")
-            return {"duration_adjusted": False, "duration_factor": None}
+            return {"duration_adjusted": False, "duration_factor": None, "temp_dirs": [temp_dir]}
 
         if not adjusted_path.exists():
             print("[DURATION FIX] Output file not created")
-            return {"duration_adjusted": False, "duration_factor": None}
+            return {"duration_adjusted": False, "duration_factor": None, "temp_dirs": [temp_dir]}
 
         new_duration = get_video_duration(str(adjusted_path))
         if new_duration is None:
@@ -781,14 +786,15 @@ def video_duration_fixer_node(state: VideoGenState) -> dict:
             "duration_adjusted": True,
             "duration_factor": actual_speed_ratio,
             "actual_duration": new_duration,
+            "temp_dirs": [temp_dir],
         }
 
     except subprocess.TimeoutExpired:
         print("[DURATION FIX] ffmpeg timeout")
-        return {"duration_adjusted": False, "duration_factor": None}
+        return {"duration_adjusted": False, "duration_factor": None, "temp_dirs": [temp_dir]}
     except Exception as e:
         print(f"[DURATION FIX] Error: {e}")
-        return {"duration_adjusted": False, "duration_factor": None}
+        return {"duration_adjusted": False, "duration_factor": None, "temp_dirs": [temp_dir]}
 
 
 # ============================================================================
@@ -848,6 +854,62 @@ def synchronizer_node(state: VideoGenState) -> dict:
 # NODE 7: Audio Video Merger (with ffmpeg)
 # ============================================================================
 
+_TEMP_PREFIXES = ("manim_exec_", "manim_durfix_", "manim_merge_", "kokoro_")
+
+
+def _cleanup_temp_artifacts(state: VideoGenState, extra_dirs: Optional[list] = None) -> None:
+    """Remove per-job temp directories and TTS wav files.
+
+    Only paths directly under the system temp dir whose basename carries one
+    of the known job prefixes are removed, so a bad path in state can never
+    delete anything else.
+    """
+    tmp_root = Path(tempfile.gettempdir()).resolve()
+
+    for dir_str in list(state.get("temp_dirs") or []) + list(extra_dirs or []):
+        if not dir_str:
+            continue
+        path = Path(dir_str).resolve()
+        if path.parent != tmp_root or not path.name.startswith(_TEMP_PREFIXES):
+            continue
+        shutil.rmtree(path, ignore_errors=True)
+
+    for wav_str in state.get("audio_segments") or []:
+        if not wav_str:
+            continue
+        path = Path(wav_str).resolve()
+        if path.parent == tmp_root and path.name.startswith("kokoro_"):
+            path.unlink(missing_ok=True)
+
+
+def _finish_merge(state: VideoGenState, video_path: Optional[str], merge_dir: Optional[str] = None) -> dict:
+    """Persist the final video into the project output dir, then clean up temp artifacts.
+
+    Temp dirs are only removed once the video has been copied out of them
+    (or when there is no video at all), so a failed copy never loses the render.
+    """
+    final_path = None
+    persisted = False
+
+    if video_path and Path(video_path).exists():
+        try:
+            project_output = Path("output")
+            project_output.mkdir(parents=True, exist_ok=True)
+            output_copy = project_output / f"output_{uuid.uuid4().hex[:8]}.mp4"
+            shutil.copy2(video_path, output_copy)
+            final_path = str(output_copy.resolve())
+            persisted = True
+            print(f"[AUDIO MERGE] Final output: {final_path}")
+        except OSError as e:
+            print(f"[AUDIO MERGE] Could not copy output out of temp dir: {e}")
+            final_path = video_path
+
+    if persisted or final_path is None:
+        _cleanup_temp_artifacts(state, [merge_dir] if merge_dir else None)
+
+    return {"final_output_path": final_path}
+
+
 def audio_video_merger_node(state: VideoGenState) -> dict:
     """
     Merge audio segments with video using ffmpeg.
@@ -869,18 +931,18 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
 
     if not video_path:
         print("[AUDIO MERGE] No video path provided")
-        return {"final_output_path": None}
+        return _finish_merge(state, None)
 
     valid_audio_segments = [p for p in audio_segments if p and Path(p).exists()]
     print(f"[AUDIO MERGE] Valid audio files: {len(valid_audio_segments)}")
 
     if not valid_audio_segments:
         print("[AUDIO MERGE] No valid audio segments, returning video only")
-        return {"final_output_path": video_path}
+        return _finish_merge(state, video_path)
+
+    temp_dir = tempfile.mkdtemp(prefix="manim_merge_")
 
     try:
-        temp_dir = tempfile.mkdtemp(prefix="manim_merge_")
-
         video_duration = get_video_duration(video_path)
         if video_duration is not None:
             print(f"[AUDIO MERGE] Video duration: {video_duration:.1f}s")
@@ -911,7 +973,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
 
         if not sections_with_audio:
             print("[AUDIO MERGE] No audio segments within video bounds")
-            return {"final_output_path": video_path}
+            return _finish_merge(state, video_path, temp_dir)
 
         # Sort by timestamp
         sections_with_audio.sort(key=lambda s: s["timestamp"])
@@ -1005,7 +1067,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
 
         if not concat_pieces:
             print("[AUDIO MERGE] No audio pieces produced")
-            return {"final_output_path": video_path}
+            return _finish_merge(state, video_path, temp_dir)
 
         # 5. Concatenate all pieces into one audio file
         merged_audio = Path(temp_dir) / "merged_audio.wav"
@@ -1029,7 +1091,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
             result = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=60)
             if result.returncode != 0 or not merged_audio.exists():
                 print(f"[AUDIO MERGE] Concat failed: {result.stderr[:200]}")
-                return {"final_output_path": video_path}
+                return _finish_merge(state, video_path, temp_dir)
 
         # Log merged audio duration
         audio_dur = get_video_duration(str(merged_audio), timeout=10)
@@ -1089,23 +1151,16 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
 
         if not final_output.exists():
             print("[AUDIO MERGE] Final output not created")
-            return {"final_output_path": video_path}
+            return _finish_merge(state, video_path, temp_dir)
 
-        # Copy to the project output directory for easy access
-        project_output = Path("output")
-        project_output.mkdir(parents=True, exist_ok=True)
-        output_copy = project_output / f"output_{uuid.uuid4().hex[:8]}.mp4"
-        shutil.copy2(str(final_output), str(output_copy))
-        print(f"[AUDIO MERGE] Copied to: {output_copy.resolve()}")
-
-        print(f"[AUDIO MERGE] Success! Final output: {final_output}")
-        return {"final_output_path": str(final_output)}
+        print(f"[AUDIO MERGE] Merge success: {final_output}")
+        return _finish_merge(state, str(final_output), temp_dir)
 
     except Exception as e:
         print(f"[AUDIO MERGE] Error: {e}")
         import traceback
         traceback.print_exc()
-        return {"final_output_path": video_path}
+        return _finish_merge(state, video_path, temp_dir)
 
 
 def _build_atempo_chain(factor: float) -> str:

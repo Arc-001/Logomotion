@@ -86,7 +86,9 @@ class VideoGenState(TypedDict):
     synced_video_path: Optional[str]
     
     audio_segments: list[str]  # Paths to audio files
-    
+
+    temp_dirs: Annotated[list[str], add]  # Per-job temp dirs, removed after final merge
+
     actual_duration: Optional[float]  # Measured duration of rendered video (seconds)
     target_duration: float  # Computed target duration (scene_length * 60)
     duration_adjusted: bool  # Whether video was time-stretched/trimmed
@@ -206,7 +208,9 @@ def create_initial_state(
         synced_video_path=None,
         
         audio_segments=[],
-        
+
+        temp_dirs=[],
+
         actual_duration=None,
         target_duration=scene_length * 60.0,
         duration_adjusted=False,
