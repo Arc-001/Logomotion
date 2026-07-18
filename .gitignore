@@ -110,3 +110,4 @@ Thumbs.db
 # Cache
 .cache
 *.tsbuildinfo
+!.env.example

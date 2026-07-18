@@ -7,13 +7,15 @@ An agentic system that generates narrated mathematical and technical animations 
 ![System Architecture](assets/architecture.png)
 
 
-1. **video_code_gen** -- Retrieves similar Manim examples via hybrid search (vector + graph), builds a prompt with positioning/API constraints, and calls the LLM to produce scene code and a timestamped transcript.
-2. **code_executor** -- Writes the code to a temp file and runs `manim render`. On failure, passes the error downstream.
-3. **recorrector** -- Receives the error output and the original code, asks the LLM to fix it, and sends the corrected code back to the executor. Loops up to `MAX_RETRIES` times (default 5).
-4. **transcript_processor** -- Runs in parallel with the code branch. Splits the transcript into segments and synthesizes each one with Kokoro TTS (82M parameter model, runs locally on CPU).
-5. **render_checker** -- Validates the rendered video (file size, ffprobe).
-6. **synchronizer** -- Joins the video and audio branches.
-7. **audio_video_merger** -- Concatenates all audio segments and merges them with the video via ffmpeg.
+1. **storyboard** -- Plans the video as timed sections (title, duration, visuals, narration) before any code is written. Toggle with `STORYBOARD_ENABLED` (default on).
+2. **video_code_gen** -- Retrieves similar Manim examples via hybrid search (vector + graph, guided by class/animation hints mined from the prompt), builds a prompt with positioning/API constraints and the storyboard, and calls the LLM to produce scene code and a timestamped transcript.
+3. **code_executor** -- Statically validates the code (syntax, scene class, removed APIs), writes it to a temp file, and runs `manim render`. On failure, passes the error downstream.
+4. **recorrector** -- Receives the error output and the original code, asks the LLM to fix it, and sends the corrected code back to the executor. Loops up to `MAX_RETRIES` times (default 3).
+5. **visual_qa** (optional) -- Extracts frames from the rendered video and asks the multimodal LLM to spot layout problems (overlaps, off-frame content, empty screens). A layout-only corrector fixes the code and re-renders, capped at `VISUAL_QA_MAX_ATTEMPTS`. Enable with `VISUAL_QA_ENABLED`, the `visual_qa` API field, or `--visual-qa`.
+6. **transcript_processor** -- Runs in parallel with the code branch. Splits the transcript into segments and synthesizes each one with Kokoro TTS (82M parameter model, runs locally on CPU).
+7. **render_checker** -- Validates the rendered video (integrity, resolution, duration vs. target).
+8. **synchronizer** -- Joins the video and audio branches.
+9. **audio_video_merger** -- Concatenates all audio segments, merges them with the video via ffmpeg, persists the result to `output/`, and cleans up all per-job temp files.
 
 ## Prerequisites
 
@@ -49,7 +51,15 @@ All configuration lives in `.env`. Key variables:
 | `OPENROUTER_BASE_URL` | Base URL for the API | `https://openrouter.ai/api/v1` |
 | `VIDEO_LENGTH` | Default target video length in minutes | `1.0` |
 | `EXPLANATION_DEPTH` | Default depth: `basic`, `detailed`, or `comprehensive` | `detailed` |
-| `MAX_RETRIES` | Maximum error-correction attempts | `5` |
+| `MAX_RETRIES` | Maximum error-correction attempts | `3` |
+| `LLM_RETRIES` | LLM call retries with exponential backoff | `3` |
+| `RENDER_QUALITY` | Render quality: `low`, `medium`, `high` (or manim flags `l`/`m`/`h`/`p`/`k`) | `medium` |
+| `RENDER_FPS` | Frame rate override | manim default |
+| `STORYBOARD_ENABLED` | Plan timed sections before generating code | `true` |
+| `VISUAL_QA_ENABLED` | Multimodal review of rendered frames with layout auto-fix | `false` |
+| `VISUAL_QA_MAX_ATTEMPTS` | Layout-fix re-render attempts per job | `1` |
+| `VISUAL_QA_FRAMES` | Frames sampled per visual QA review | `6` |
+| `CORS_ALLOW_ORIGINS` | Comma-separated allowed origins for the API | localhost dev origins |
 | `NEO4J_URI` | Neo4j Bolt URI | `bolt://localhost:7687` |
 | `NEO4J_USER` | Neo4j username | `neo4j` |
 | `NEO4J_PASSWORD` | Neo4j password | `password` |
@@ -82,6 +92,9 @@ Options:
 | `-d`, `--depth` | Explanation depth: `basic`, `detailed`, `comprehensive` | from `.env` or `detailed` |
 | `-o`, `--output` | Output directory for code and video | none |
 | `-t`, `--title` | Scene title | `Generated Scene` |
+| `-q`, `--quality` | Render quality: `low`, `medium`, `high` | from `.env` or `medium` |
+| `--fps` | Frame rate override | manim default |
+| `--visual-qa` | Review rendered frames and auto-fix layout problems | off |
 
 Example with all options:
 
@@ -131,6 +144,9 @@ Start a video generation job. Returns immediately with a job ID.
 | `length` | float | no | Target length in minutes (0.1--30.0, default from `.env`) |
 | `depth` | string | no | `basic`, `detailed`, or `comprehensive` (default from `.env`) |
 | `title` | string | no | Scene title (default: `Generated Scene`) |
+| `quality` | string | no | `low`, `medium`, or `high` (default from `.env`) |
+| `fps` | int | no | Frame rate override, 5--60 (default: manim's default) |
+| `visual_qa` | bool | no | Review rendered frames and auto-fix layout (default from `.env`) |
 
 **Response:**
 
@@ -150,9 +166,10 @@ Poll for job status.
 {
   "job_id": "a1b2c3d4",
   "status": "completed",
-  "video_path": "/tmp/manim_merge_.../final_with_audio.mp4",
+  "video_path": "output/output_a1b2c3d4.mp4",
   "code": "from manim import *\n...",
-  "error": null
+  "error": null,
+  "warnings": ["Duration mismatch: video is 25% longer than target (75.0s vs 60.0s)"]
 }
 ```
 
