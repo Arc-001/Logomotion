@@ -1,4 +1,6 @@
-const API_BASE = '/api'
+// In dev the Vite proxy rewrites /api/* to the backend; the production
+// build is served by FastAPI itself, whose routes have no /api prefix.
+const API_BASE = import.meta.env.DEV ? '/api' : ''
 
 export async function api(path, opts = {}) {
     const res = await fetch(`${API_BASE}${path}`, {
