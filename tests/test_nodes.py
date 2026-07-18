@@ -359,3 +359,81 @@ class TestRecorrectorNode:
         assert result["code"].startswith("# Error was: NameError: broken")
         assert "broken = True" in result["code"]
         assert result["error"] is None
+
+
+# ============================================================================
+# llm_chat retry behavior
+# ============================================================================
+
+class _FlakyCompletions:
+    """chat.completions stub that fails a set number of times, then succeeds."""
+
+    def __init__(self, failures: int, content: str = "ok"):
+        self.failures = failures
+        self.calls = 0
+        self.content = content
+
+    def create(self, **kwargs):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise RuntimeError("transient failure")
+
+        class _Msg:
+            content = self.content
+
+        class _Choice:
+            message = _Msg()
+
+        class _Completion:
+            choices = [_Choice()]
+
+        return _Completion()
+
+
+def _fake_client(completions):
+    class _Chat:
+        pass
+
+    class _Client:
+        chat = _Chat()
+
+    _Client.chat.completions = completions
+    return _Client()
+
+
+class TestLlmChatRetry:
+    def test_retries_transient_failures_then_succeeds(self, monkeypatch):
+        from src.agent import nodes
+
+        completions = _FlakyCompletions(failures=2)
+        monkeypatch.setattr(nodes, "get_llm_client", lambda: _fake_client(completions))
+        monkeypatch.setattr(nodes.time, "sleep", lambda s: None)
+
+        result = nodes.llm_chat([{"role": "user", "content": "hi"}])
+
+        assert result == "ok"
+        assert completions.calls == 3
+
+    def test_returns_none_after_exhausting_retries(self, monkeypatch):
+        from src.agent import nodes
+
+        completions = _FlakyCompletions(failures=100)
+        monkeypatch.setattr(nodes, "get_llm_client", lambda: _fake_client(completions))
+        monkeypatch.setattr(nodes.time, "sleep", lambda s: None)
+
+        result = nodes.llm_chat([{"role": "user", "content": "hi"}])
+
+        assert result is None
+        assert completions.calls == 3
+
+    def test_empty_response_is_retried(self, monkeypatch):
+        from src.agent import nodes
+
+        completions = _FlakyCompletions(failures=0, content="")
+        monkeypatch.setattr(nodes, "get_llm_client", lambda: _fake_client(completions))
+        monkeypatch.setattr(nodes.time, "sleep", lambda s: None)
+
+        result = nodes.llm_chat([{"role": "user", "content": "hi"}])
+
+        assert result is None
+        assert completions.calls == 3
