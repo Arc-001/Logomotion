@@ -14,6 +14,8 @@ from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
 
+from .validator import validate_manim_code
+
 
 @dataclass
 class ExecutionResult:
@@ -129,6 +131,21 @@ class ManimExecutor:
         Returns:
             ExecutionResult with video path or error
         """
+        # Static validation first: a syntax error or forbidden API should
+        # fail in milliseconds with a line-precise message, not burn the
+        # full render timeout inside the manim subprocess.
+        validation_error = validate_manim_code(code, scene_class_name)
+        if validation_error:
+            return ExecutionResult(
+                success=False,
+                video_path=None,
+                error=validation_error,
+                stdout="",
+                stderr="",
+                code_path="",
+                output_dir="",
+            )
+
         temp_dir = tempfile.mkdtemp(prefix="manim_exec_")
         code_path = Path(temp_dir) / "scene.py"
         output_dir = Path(temp_dir) / "media"

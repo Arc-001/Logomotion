@@ -33,7 +33,7 @@ except ImportError:
 from .state import VideoGenState, TranscriptSection
 from ..config import get_settings
 from ..manim_runner.executor import ManimExecutor
-from ..manim_runner.validator import get_video_duration
+from ..manim_runner.validator import VideoValidator, get_video_duration
 
 
 # ============================================================================
@@ -500,7 +500,7 @@ def code_executor_node(state: VideoGenState) -> dict:
         orientation=orientation,
     )
 
-    exec_temp_dir = str(Path(result.code_path).parent)
+    exec_temp_dirs = [str(Path(result.code_path).parent)] if result.code_path else []
 
     if result.success:
         print(f"[EXECUTOR] Render SUCCESS: {result.video_path}")
@@ -509,7 +509,7 @@ def code_executor_node(state: VideoGenState) -> dict:
             "error": None,
             "render_logs": f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}",
             "temp_code_path": result.code_path,
-            "temp_dirs": [exec_temp_dir],
+            "temp_dirs": exec_temp_dirs,
         }
 
     print(f"[EXECUTOR] Render FAILED: {(result.error or '')[:200]}...")
@@ -518,7 +518,7 @@ def code_executor_node(state: VideoGenState) -> dict:
         "error_count": 1,
         "render_logs": f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}",
         "temp_code_path": result.code_path,
-        "temp_dirs": [exec_temp_dir],
+        "temp_dirs": exec_temp_dirs,
     }
 
 
@@ -685,12 +685,19 @@ def render_checker_node(state: VideoGenState) -> dict:
             "pipeline_warnings": warnings,
         }
 
-    file_size = Path(video_path).stat().st_size
-    print(f"[RENDER CHECK] Video file size: {file_size} bytes")
-    if file_size < 1000:
-        errors.append(f"Video file too small: {file_size} bytes")
+    integrity = VideoValidator().validate(video_path)
+    errors.extend(integrity.errors)
+    if integrity.width and integrity.height:
+        print(
+            f"[RENDER CHECK] Video: {integrity.width}x{integrity.height} "
+            f"({integrity.codec or 'unknown codec'})"
+        )
+    for integrity_warning in integrity.warnings:
+        print(f"[RENDER CHECK] Warning: {integrity_warning}")
 
-    actual_duration = get_video_duration(video_path)
+    actual_duration = integrity.duration
+    if actual_duration is None:
+        actual_duration = get_video_duration(video_path)
     if actual_duration is not None:
         print(f"[RENDER CHECK] Actual duration: {actual_duration:.1f}s (target: {target_duration:.1f}s)")
 
