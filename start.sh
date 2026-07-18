@@ -26,6 +26,9 @@ BLUE='\033[0;34m'
 YELLOW='\033[0;33m'
 NC='\033[0m'
 
+# API server port (override: PORT=8010 ./start.sh start)
+PORT="${PORT:-8000}"
+
 banner() {
     echo -e "${BLUE}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${BLUE}║                        Logomotion                            ║${NC}"
@@ -143,10 +146,10 @@ cmd_start() {
     echo "[START] Bringing up Neo4j (with seed) ..."
     compose up -d neo4j
     echo ""
-    echo -e "${GREEN}API + Web UI at: http://localhost:8000${NC}"
+    echo -e "${GREEN}API + Web UI at: http://localhost:${PORT}${NC}"
     echo "Press Ctrl+C to stop the server (containers keep running; ./start.sh stop)"
     echo ""
-    python -m src.main serve --host 0.0.0.0 --port 8000
+    python -m src.main serve --host 0.0.0.0 --port "$PORT"
 }
 
 cmd_stop() {
@@ -168,11 +171,14 @@ usage() {
     echo ""
     echo "Everything else:"
     echo "  serve                Run the API server only (local venv)"
+    echo "  dev                  Run the Vite frontend dev server (hot reload)"
     echo "  index [path]         Index the Manim dataset"
     echo "  generate \"prompt\"    Generate a video (extra flags forwarded)"
     echo "  test                 Run the test suite"
     echo "  logs                 Follow container logs"
     echo "  status               Show container status"
+    echo ""
+    echo "Env: PORT=<n> overrides the API port (default 8000)"
 }
 
 case "${1:-help}" in
@@ -219,10 +225,17 @@ case "${1:-help}" in
         activate_venv
         echo "[SERVER] Starting API server..."
         echo ""
-        echo -e "${GREEN}API + Web UI at: http://localhost:8000${NC}"
+        echo -e "${GREEN}API + Web UI at: http://localhost:${PORT}${NC}"
         echo "Press Ctrl+C to stop"
         echo ""
-        python -m src.main serve --host 0.0.0.0 --port 8000
+        python -m src.main serve --host 0.0.0.0 --port "$PORT"
+        ;;
+
+    "dev"|"frontend")
+        banner
+        echo "[DEV] Starting Vite dev server (proxies /api to the backend on port ${PORT})..."
+        cd frontend
+        VITE_API_TARGET="http://localhost:${PORT}" npm run dev
         ;;
 
     "test"|"tests")
