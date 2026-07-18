@@ -31,7 +31,6 @@ except ImportError:
 
 from .state import VideoGenState, TranscriptSection
 from ..config import get_settings
-from ..graph_rag.retriever import ManimRetriever
 from ..manim_runner.executor import ManimExecutor
 from ..manim_runner.validator import get_video_duration
 
@@ -199,6 +198,8 @@ def video_code_gen_node(state: VideoGenState) -> dict:
     Input: system_message, scene_title, scene_prompt_description
     Output: code, transcript, retrieved_examples, retrieved_context
     """
+    from ..graph_rag.retriever import ManimRetriever  # deferred: pulls in DB drivers
+
     retriever = ManimRetriever()
 
     try:

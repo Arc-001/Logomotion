@@ -5,7 +5,10 @@ Provides lazy-initialised Neo4j and ChromaDB connections used
 by both the Indexer and the Retriever.
 """
 
-from neo4j import GraphDatabase
+try:
+    from neo4j import GraphDatabase
+except ImportError:
+    GraphDatabase = None
 
 try:
     import chromadb
@@ -28,6 +31,8 @@ class GraphRAGClients:
     def neo4j_driver(self):
         """Lazy-load Neo4j driver."""
         if self._neo4j_driver is None:
+            if GraphDatabase is None:
+                raise RuntimeError("neo4j driver is not installed")
             settings = get_settings()
             self._neo4j_driver = GraphDatabase.driver(
                 settings.neo4j_uri,
