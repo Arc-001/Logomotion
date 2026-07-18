@@ -27,18 +27,31 @@ class ExecutionResult:
     output_dir: str
 
 
+# Portrait output resolution per quality flag, so portrait render cost
+# tracks the requested quality instead of always forcing 1080x1920.
+_PORTRAIT_RESOLUTIONS = {
+    "l": "480,854",
+    "m": "720,1280",
+    "h": "1080,1920",
+    "p": "1440,2560",
+    "k": "2160,3840",
+}
+
+
 class ManimExecutor:
     """Executes Manim code in a sandboxed environment."""
-    
+
     def __init__(
         self,
         base_output_dir: Optional[str] = None,
-        quality: str = "l",  # l=low, m=medium, h=high
+        quality: str = "m",  # manim quality flag: l, m, h, p, k
         timeout: int = 120,
+        fps: Optional[int] = None,  # None = manim's default for the quality
     ):
         self.base_output_dir = base_output_dir or tempfile.gettempdir()
         self.quality = quality
         self.timeout = timeout
+        self.fps = fps
     
     @staticmethod
     def _is_manim_runnable(path: str) -> bool:
@@ -135,8 +148,12 @@ class ManimExecutor:
             ]
 
             if orientation == "portrait":
-                cmd.extend(["--resolution", "1080,1920"])
-            
+                resolution = _PORTRAIT_RESOLUTIONS.get(self.quality, "720,1280")
+                cmd.extend(["--resolution", resolution])
+
+            if self.fps:
+                cmd.extend(["--fps", str(self.fps)])
+
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -259,9 +276,10 @@ def execute_manim(
     code: str,
     scene_class_name: str,
     output_dir: Optional[str] = None,
-    quality: str = "l",
+    quality: str = "m",
     timeout: int = 120,
     orientation: str = "landscape",
+    fps: Optional[int] = None,
 ) -> ExecutionResult:
     """
     Convenience function to execute Manim code.
@@ -270,9 +288,10 @@ def execute_manim(
         code: Python code with Manim Scene
         scene_class_name: Name of the Scene class
         output_dir: Optional output directory
-        quality: Render quality (l/m/h)
+        quality: Render quality flag (l/m/h/p/k)
         timeout: Execution timeout in seconds
         orientation: Video orientation (landscape/portrait)
+        fps: Frame rate override (None = manim's default)
 
     Returns:
         ExecutionResult with success status and paths
@@ -281,5 +300,6 @@ def execute_manim(
         base_output_dir=output_dir,
         quality=quality,
         timeout=timeout,
+        fps=fps,
     )
     return executor.execute(code, scene_class_name, orientation=orientation)

@@ -489,7 +489,11 @@ def code_executor_node(state: VideoGenState) -> dict:
     print(f"[EXECUTOR] Starting Manim render for scene: {scene_class}")
 
     settings = get_settings()
-    executor = ManimExecutor(quality="l", timeout=settings.render_timeout)
+    executor = ManimExecutor(
+        quality=state.get("render_quality") or settings.render_quality,
+        fps=state.get("render_fps"),
+        timeout=settings.render_timeout,
+    )
     result = executor.execute(
         code=state["code"],
         scene_class_name=scene_class,

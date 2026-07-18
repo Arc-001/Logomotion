@@ -8,10 +8,26 @@ so that no other module needs to call os.getenv() directly.
 import os
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import Optional
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+_QUALITY_ALIASES = {
+    "low": "l", "medium": "m", "high": "h", "production": "p", "4k": "k",
+    "l": "l", "m": "m", "h": "h", "p": "p", "k": "k",
+}
+
+
+def normalize_render_quality(value: str) -> str:
+    """Map quality names (low/medium/high/...) to manim's single-letter flags."""
+    normalized = _QUALITY_ALIASES.get(value.strip().lower())
+    if normalized is None:
+        raise ValueError(
+            f"Invalid render quality {value!r}; expected one of {sorted(set(_QUALITY_ALIASES))}"
+        )
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -34,6 +50,8 @@ class Settings:
     # Manim execution
     max_retries: int = 3
     render_timeout: int = 120
+    render_quality: str = "m"  # manim quality flag: l, m, h, p, or k
+    render_fps: Optional[int] = None  # None = manim's default for the quality
 
     # LLM call retries (transport-level, with exponential backoff)
     llm_retries: int = 3
@@ -58,6 +76,8 @@ def get_settings() -> Settings:
         chroma_persist_dir=os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db"),
         max_retries=int(os.getenv("MAX_RETRIES", "3")),
         render_timeout=int(os.getenv("RENDER_TIMEOUT", "120")),
+        render_quality=normalize_render_quality(os.getenv("RENDER_QUALITY", "m")),
+        render_fps=int(os.getenv("RENDER_FPS")) if os.getenv("RENDER_FPS") else None,
         llm_retries=int(os.getenv("LLM_RETRIES", "3")),
         video_length=float(os.getenv("VIDEO_LENGTH", "1.0")),
         explanation_depth=os.getenv("EXPLANATION_DEPTH", "detailed"),
