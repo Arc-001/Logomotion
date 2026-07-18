@@ -87,6 +87,12 @@ class VideoGenState(TypedDict):
     
     video_valid: bool
     validation_errors: list[str]
+
+    # Visual QA (multimodal frame review of the rendered video)
+    visual_qa_enabled: bool
+    visual_acceptable: bool
+    visual_issues: list[dict]
+    visual_fix_count: Annotated[int, add]  # Layout-fix attempts used
     
     checked_video_path: Optional[str]
     synced_video_path: Optional[str]
@@ -120,6 +126,7 @@ def create_initial_state(
     render_quality: Optional[str] = None,
     render_fps: Optional[int] = None,
     storyboard_enabled: Optional[bool] = None,
+    visual_qa_enabled: Optional[bool] = None,
 ) -> VideoGenState:
     """Create initial state for the workflow."""
     settings = get_settings()
@@ -131,6 +138,8 @@ def create_initial_state(
         render_fps = settings.render_fps
     if storyboard_enabled is None:
         storyboard_enabled = settings.storyboard_enabled
+    if visual_qa_enabled is None:
+        visual_qa_enabled = settings.visual_qa_enabled
     
     if orientation == "portrait":
         frame_desc = "8 units wide (-4 to +4) and 14.2 units tall (-7.1 to +7.1)"
@@ -226,6 +235,11 @@ def create_initial_state(
         
         video_valid=False,
         validation_errors=[],
+
+        visual_qa_enabled=visual_qa_enabled,
+        visual_acceptable=True,
+        visual_issues=[],
+        visual_fix_count=0,
         
         checked_video_path=None,
         synced_video_path=None,

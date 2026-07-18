@@ -63,6 +63,12 @@ class Settings:
     duration_mode: str = "guide"  # "guide" = soft hint, "strict" = ffmpeg speed adjust
     storyboard_enabled: bool = True  # plan timed sections before writing code
 
+    # Visual QA (multimodal review of rendered frames; opt-in — adds a
+    # vision call and possibly a full re-render per attempt)
+    visual_qa_enabled: bool = False
+    visual_qa_max_attempts: int = 1
+    visual_qa_frames: int = 6
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
@@ -86,4 +92,8 @@ def get_settings() -> Settings:
         duration_mode=os.getenv("DURATION_MODE", "guide"),
         storyboard_enabled=os.getenv("STORYBOARD_ENABLED", "true").strip().lower()
         in ("1", "true", "yes", "on"),
+        visual_qa_enabled=os.getenv("VISUAL_QA_ENABLED", "false").strip().lower()
+        in ("1", "true", "yes", "on"),
+        visual_qa_max_attempts=int(os.getenv("VISUAL_QA_MAX_ATTEMPTS", "1")),
+        visual_qa_frames=int(os.getenv("VISUAL_QA_FRAMES", "6")),
     )
