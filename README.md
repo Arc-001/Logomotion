@@ -238,7 +238,7 @@ Everything lives in `.env` — copy `.env.example` and go. The highlights:
 | Variable | What it controls | Default |
 |---|---|---|
 | `OPENROUTER_API_KEY` | The only key you need | required |
-| `OPENROUTER_MODEL` | Any OpenAI-compatible multimodal model | `google/gemini-3-flash-preview` |
+| `OPENROUTER_MODEL` | Any OpenAI-compatible multimodal model | `google/gemini-3.8-flash` |
 | `RENDER_QUALITY` | `low` / `medium` / `high` (or manim's `l`/`m`/`h`/`p`/`k`) | `medium` |
 | `STORYBOARD_ENABLED` | Plan-before-code stage | `true` |
 | `VISUAL_QA_ENABLED` | Frame review + layout auto-fix for every job | `false` |
@@ -250,7 +250,7 @@ Everything lives in `.env` — copy `.env.example` and go. The highlights:
 | Variable | Description | Default |
 |---|---|---|
 | `OPENROUTER_API_KEY` | API key for the LLM provider | required |
-| `OPENROUTER_MODEL` | Model identifier | `google/gemini-3-flash-preview` |
+| `OPENROUTER_MODEL` | Model identifier | `google/gemini-3.8-flash` |
 | `OPENROUTER_BASE_URL` | Base URL for the API | `https://openrouter.ai/api/v1` |
 | `LLM_RETRIES` | LLM call retries with exponential backoff | `3` |
 | `VIDEO_LENGTH` | Default target video length in minutes | `1.0` |

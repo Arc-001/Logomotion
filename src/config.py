@@ -39,7 +39,7 @@ class Settings:
 
     # OpenRouter / LLM
     openrouter_api_key: str = ""
-    openrouter_model: str = "google/gemini-3-flash-preview"
+    openrouter_model: str = "google/gemini-3.8-flash"
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
 
     # Neo4j
@@ -91,7 +91,7 @@ def get_settings() -> Settings:
             if origin.strip()
         ),
         openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
-        openrouter_model=os.getenv("OPENROUTER_MODEL", "google/gemini-3-flash-preview"),
+        openrouter_model=os.getenv("OPENROUTER_MODEL", "google/gemini-3.8-flash"),
         openrouter_base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         neo4j_uri=os.getenv("NEO4J_URI", "bolt://localhost:7687"),
         neo4j_user=os.getenv("NEO4J_USER", "neo4j"),
