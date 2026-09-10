@@ -95,6 +95,8 @@ KNOWN_MANIM_CLASSES = [
     ManimClassNode(name="Sphere", module="manim", is_mobject=True, description="3D sphere"),
 ]
 
+# Only animations that exist in Manim Community. Anything the validator
+# rejects at render time must not be advertised here as a retrieval hint.
 KNOWN_ANIMATIONS = [
     AnimationNode(name="Write", description="Draws the mobject stroke"),
     AnimationNode(name="Create", description="Creates the mobject"),
@@ -104,7 +106,6 @@ KNOWN_ANIMATIONS = [
     AnimationNode(name="ReplacementTransform", description="Morphs and replaces mobject"),
     AnimationNode(name="MoveToTarget", description="Moves to target position"),
     AnimationNode(name="Rotate", description="Rotates the mobject"),
-    AnimationNode(name="ShowCreation", description="Shows creation animation"),
     AnimationNode(name="DrawBorderThenFill", description="Draws border then fills"),
     AnimationNode(name="GrowFromCenter", description="Grows from center point"),
     AnimationNode(name="ApplyMethod", description="Applies a method as animation"),
