@@ -5,6 +5,7 @@ Provides HTTP endpoints for video generation with full control
 over length, depth, and topic.
 """
 
+import asyncio
 import uuid
 from typing import Optional, Literal
 from pathlib import Path
@@ -130,6 +131,12 @@ class JobStatus(BaseModel):
 # Simple in-memory job store
 _MAX_JOBS = 1000
 jobs: dict[str, JobStatus] = {}
+
+# A generation job spends most of its life inside manim, ffmpeg and LaTeX
+# subprocesses. Nothing previously stopped a client from starting as many as
+# it liked, so jobs now queue here instead of trampling the host. Jobs waiting
+# for a slot stay "pending"; they become "running" once they hold one.
+_job_slots = asyncio.Semaphore(get_settings().max_concurrent_jobs)
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +282,31 @@ async def _run_generation_job(
     """Background task to run video generation."""
     from .agent.graph import generate_video
 
-    jobs[job_id].status = "running"
+    async with _job_slots:
+        if job_id not in jobs:  # evicted or cancelled while queued
+            return
+        jobs[job_id].status = "running"
+        await _generate_into_job(
+            job_id, prompt, title, length, depth, orientation, duration_mode,
+            web_search, quality, fps, visual_qa,
+        )
+
+
+async def _generate_into_job(
+    job_id: str,
+    prompt: str,
+    title: Optional[str],
+    length: float,
+    depth: str,
+    orientation: str,
+    duration_mode: str,
+    web_search: bool,
+    quality: Optional[str],
+    fps: Optional[int],
+    visual_qa: Optional[bool],
+):
+    """Run one generation and record its outcome against the job."""
+    from .agent.graph import generate_video
 
     try:
         result = await generate_video(

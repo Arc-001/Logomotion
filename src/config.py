@@ -50,6 +50,12 @@ class Settings:
     # ChromaDB
     chroma_persist_dir: str = "./chroma_db"
 
+    # Job execution
+    # Each job drives manim + ffmpeg + LaTeX, so the host, not the client,
+    # decides how many run at once.
+    max_concurrent_jobs: int = 2
+    job_timeout: int = 1800  # wall-clock ceiling for one generation job
+
     # Manim execution
     max_retries: int = 3
     render_timeout: int = 120
@@ -91,6 +97,8 @@ def get_settings() -> Settings:
         neo4j_user=os.getenv("NEO4J_USER", "neo4j"),
         neo4j_password=os.getenv("NEO4J_PASSWORD", "password"),
         chroma_persist_dir=os.getenv("CHROMA_PERSIST_DIRECTORY", "./chroma_db"),
+        max_concurrent_jobs=max(1, int(os.getenv("MAX_CONCURRENT_JOBS", "2"))),
+        job_timeout=int(os.getenv("JOB_TIMEOUT", "1800")),
         max_retries=int(os.getenv("MAX_RETRIES", "3")),
         render_timeout=int(os.getenv("RENDER_TIMEOUT", "120")),
         render_quality=normalize_render_quality(os.getenv("RENDER_QUALITY", "m")),
