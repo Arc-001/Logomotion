@@ -9,9 +9,11 @@ Parses JSONL files and builds:
 import json
 import re
 import hashlib
+from collections import Counter
 from pathlib import Path
 from typing import Generator, Optional
 
+from .curation import example_rejection_reason
 from .db import GraphRAGClients
 from .schema import (
     ExampleNode,
@@ -219,10 +221,24 @@ class ManimIndexer(GraphRAGClients):
         print(f"Found {len(files)} JSONL files")
 
         total_indexed = 0
+        total_skipped = 0
+        skip_reasons: Counter = Counter()
+
         for file_path in files:
             print(f"Processing {file_path.name}...")
             file_count = 0
+            file_skipped = 0
             for example in self._parse_jsonl(file_path):
+                # Retrieved examples are shown to the code generator as things
+                # to imitate, so anything that cannot run on its own is worse
+                # than no example at all.
+                reason = example_rejection_reason(example["code"])
+                if reason:
+                    file_skipped += 1
+                    total_skipped += 1
+                    skip_reasons[reason.split(":")[0]] += 1
+                    continue
+
                 self.index_example(
                     prompt=example["prompt"],
                     code=example["code"],
@@ -234,9 +250,11 @@ class ManimIndexer(GraphRAGClients):
                 if total_indexed % 100 == 0:
                     print(f"  Indexed {total_indexed} examples...")
 
-            print(f"  Completed {file_path.name}: {file_count} examples")
+            print(f"  Completed {file_path.name}: {file_count} indexed, {file_skipped} skipped")
 
-        print(f"\nTotal indexed: {total_indexed} examples")
+        print(f"\nTotal indexed: {total_indexed} examples ({total_skipped} skipped)")
+        for reason, count in skip_reasons.most_common():
+            print(f"  skipped {count:5d}: {reason}")
         return total_indexed
 
 

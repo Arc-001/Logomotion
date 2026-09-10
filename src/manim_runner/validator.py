@@ -16,12 +16,18 @@ from typing import Optional
 
 
 # Known-fatal legacy/forbidden Manim APIs with actionable replacements.
+# Shared with corpus curation, which must reject the same APIs it would
+# otherwise show the generator as examples to imitate.
+REMOVED_APIS = {
+    "ShowCreation": "ShowCreation was removed in Manim CE; use Create(...)",
+    "TextMobject": "TextMobject was removed; use Text(...)",
+    "TexMobject": "TexMobject was removed; use MathTex(r\"...\")",
+    "FadeInFromDown": "FadeInFromDown was removed; use FadeIn(..., shift=UP)",
+    "Code": "Do not use the Code() class; use Text() with a monospace font",
+}
+
 _LEGACY_API_PATTERNS = [
-    (r"\bShowCreation\s*\(", "ShowCreation was removed in Manim CE; use Create(...)"),
-    (r"\bTextMobject\s*\(", "TextMobject was removed; use Text(...)"),
-    (r"\bTexMobject\s*\(", "TexMobject was removed; use MathTex(r\"...\")"),
-    (r"\bFadeInFromDown\s*\(", "FadeInFromDown was removed; use FadeIn(..., shift=UP)"),
-    (r"\bCode\s*\(", "Do not use the Code() class; use Text() with a monospace font"),
+    (rf"\b{name}\s*\(", message) for name, message in REMOVED_APIS.items()
 ]
 
 
