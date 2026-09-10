@@ -169,14 +169,19 @@ def create_initial_state(
     - NEVER render new text or visuals on top of existing elements that are already on screen.
 
 ### RULE 2 — FORBIDDEN SYNTAX
-    - DO NOT use raw absolute coordinate arrays: NO `move_to([2, -1, 0])`, NO `move_to(np.array([x, y, 0]))`.
-    - These always produce miscalculated spacing and overlapping elements.
+    - DO NOT lay out elements with hard-coded literal coordinates: NO `move_to([2, -1, 0])`, NO `.shift(np.array([1.5, 0, 0]))`.
+    - Literal numbers guessed by eye produce miscalculated spacing and overlapping elements.
+    - EXCEPTION — coordinates that come from a coordinate system are REQUIRED, not forbidden:
+      `Dot(ax.c2p(2, 4))`, `label.move_to(ax.c2p(x, y))`, `ax.plot(lambda x: x**2)`.
+      Those are computed by Manim from the axes, not guessed, and are the correct
+      way to place anything that belongs on a graph.
 
 ### RULE 3 — MANDATORY RELATIVE POSITIONING
     - ONLY position elements relative to screen edges or to other mobjects.
     - Screen edges: `.to_edge(UP)`, `.to_edge(DOWN)`, `.to_edge(LEFT)`, `.to_edge(RIGHT)`.
     - Stacking: `.next_to(other_mobject, DOWN, buff=0.5)` to place elements sequentially.
     - Centering: `.move_to(ORIGIN)` is allowed (ORIGIN is a named constant, not a raw array).
+    - On a graph: position via the axes, e.g. `.move_to(ax.c2p(x, y))` or `.next_to(ax.c2p(x, y), UP)`.
     - The Manim frame is {frame_desc}.
     - {layout_hint}
 

@@ -728,9 +728,15 @@ transcript = {{
 
 ### 2. POSITIONING — FORBIDDEN AND REQUIRED PATTERNS
 **FORBIDDEN (NEVER USE):**
-- `move_to([2, -1, 0])` — raw coordinate arrays are BANNED.
-- `move_to(np.array([x, y, 0]))` — BANNED.
-- Any hard-coded spatial number pair used to separate or offset elements.
+- `move_to([2, -1, 0])` — literal coordinate arrays for layout are BANNED.
+- `.shift(np.array([1.5, 0, 0]))` — BANNED.
+- Any hard-coded spatial number pair guessed by eye to separate or offset elements.
+
+**REQUIRED ON A GRAPH (coordinates from the axes are NOT hard-coded):**
+- `Dot(ax.c2p(2, 4))`, `label.move_to(ax.c2p(x, y))`, `.next_to(ax.c2p(x, y), UP)`.
+- `ax.plot(lambda x: x**2)`, `ax.get_graph_label(...)`, `ax.get_area(...)`.
+- Manim computes these from the axes, so they land exactly where the maths says.
+  Do NOT try to place points on a graph with `.to_edge()` or `.next_to()` guesses.
 
 **REQUIRED (ALWAYS USE):**
 - Screen edges: `.to_edge(UP)`, `.to_edge(DOWN)`, `.to_edge(LEFT)`, `.to_edge(RIGHT)`.

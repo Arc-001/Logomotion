@@ -1056,3 +1056,43 @@ class TestAudioVideoMergerTimeline:
         result = self._run(workdir, 10, [(0.0, 1.0), (5.0, 1.0)])
 
         assert not any("speech kept at" in w for w in (result.get("pipeline_warnings") or []))
+
+
+class TestCoordinateSystemGuidance:
+    """The blanket ban on coordinate arrays also banned ax.c2p, the only correct
+    way to place anything on a set of axes."""
+
+    def _prompt(self, monkeypatch):
+        from src.agent import nodes
+
+        captured = {}
+
+        def fake_llm(messages, temperature=0.2):
+            captured["system"] = messages[0]["content"]
+            captured["user"] = messages[1]["content"]
+            return None
+
+        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr(nodes, "llm_chat", fake_llm)
+        nodes.video_code_gen_node(_base_state())
+        return captured
+
+    def test_axes_derived_coordinates_are_required_not_banned(self, monkeypatch):
+        captured = self._prompt(monkeypatch)
+
+        assert "ax.c2p" in captured["user"]
+        assert "REQUIRED ON A GRAPH" in captured["user"]
+
+    def test_literal_coordinates_are_still_banned(self, monkeypatch):
+        captured = self._prompt(monkeypatch)
+
+        assert "move_to([2, -1, 0])" in captured["user"]
+        assert "BANNED" in captured["user"]
+
+    def test_default_system_message_carries_the_same_exception(self):
+        from src.agent.state import create_initial_state
+
+        state = create_initial_state("T", "d")
+
+        assert "ax.c2p" in state["system_message"]
+        assert "EXCEPTION" in state["system_message"]
