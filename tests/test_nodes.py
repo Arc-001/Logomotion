@@ -604,8 +604,8 @@ class TestStoryboardPromptInjection:
 
         prompt = captured["prompt"]
         assert "STORYBOARD" in prompt
-        assert "[0s–10s] Intro" in prompt
-        assert "[10s–30s] Wrap" in prompt
+        assert "[0.0s–10.0s] Intro" in prompt
+        assert "[10.0s–30.0s] Wrap" in prompt
 
 
 # ============================================================================
@@ -904,3 +904,64 @@ class TestTranscriptProcessorSkipsPreRecordedNarration:
 
         assert [s["timestamp"] for s in result["transcript_sections"]] == [0.0, 5.0]
         assert len(result["audio_segments"]) == 2
+
+
+class TestPreRecordedNarrationPrompt:
+    """With narration already recorded, code gen is timed to it and asks for no transcript."""
+
+    def _capture(self, monkeypatch, state):
+        from src.agent import nodes
+
+        captured = {}
+
+        def fake_llm(messages, temperature=0.2):
+            captured["prompt"] = messages[1]["content"]
+            return "```python\nfrom manim import *\n\nclass S(Scene):\n    def construct(self):\n        pass\n```"
+
+        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr(nodes, "llm_chat", fake_llm)
+        result = nodes.video_code_gen_node(state)
+        return captured["prompt"], result
+
+    def _state(self):
+        state = _base_state()
+        state["storyboard"] = [
+            {"title": "Intro", "duration_seconds": 12.5, "visuals": "title", "narration": "welcome"},
+            {"title": "Wrap", "duration_seconds": 7.5, "visuals": "summary", "narration": "bye"},
+        ]
+        state["narration_segments"] = [
+            {"index": 0, "text": "welcome", "audio_path": "/tmp/a.wav", "audio_duration": 11.5,
+             "timestamp": 0.0},
+            {"index": 1, "text": "bye", "audio_path": "/tmp/b.wav", "audio_duration": 6.5,
+             "timestamp": 12.5},
+        ]
+        state["target_duration"] = 20.0
+        return state
+
+    def test_prompt_states_the_measured_audio_and_forbids_a_transcript(self, monkeypatch):
+        prompt, _ = self._capture(monkeypatch, self._state())
+
+        assert "ALREADY been synthesised" in prompt
+        assert "Spoken audio: 11.5s (already recorded)" in prompt
+        assert "Spoken audio: 6.5s (already recorded)" in prompt
+        assert "TRANSCRIPT_START" not in prompt
+        assert "TRANSCRIPT / NARRATION" not in prompt
+
+    def test_prompt_targets_the_narration_derived_duration(self, monkeypatch):
+        prompt, _ = self._capture(monkeypatch, self._state())
+
+        assert "MUST come to 20 seconds" in prompt
+        assert "**Target Duration:** 20 seconds" in prompt
+
+    def test_node_does_not_publish_a_transcript(self, monkeypatch):
+        _, result = self._capture(monkeypatch, self._state())
+
+        assert "transcript" not in result
+
+    def test_single_shot_path_still_asks_for_a_transcript(self, monkeypatch):
+        state = _base_state()
+        prompt, result = self._capture(monkeypatch, state)
+
+        assert "TRANSCRIPT_START" in prompt
+        assert "TRANSCRIPT / NARRATION" in prompt
+        assert "transcript" in result

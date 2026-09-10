@@ -577,7 +577,9 @@ Used animations: {', '.join(result.used_animations)}
     finally:
         retriever.close()
 
-    target_seconds = int(state["scene_length"] * 60)
+    # narration_tts_node rewrites target_duration to the measured speech
+    # timeline, so prefer it over the raw requested length.
+    target_seconds = int(state.get("target_duration") or state["scene_length"] * 60)
     orientation = state.get("orientation", "landscape")
     print(f"[CODE GEN] Target duration: {target_seconds} seconds, orientation: {orientation}")
 
@@ -623,22 +625,49 @@ accurate, current, and informative:
     else:
         web_section = ""
 
-    # Inject the storyboard plan when the planning stage produced one
+    # Inject the storyboard plan when the planning stage produced one. When
+    # narration_tts_node already recorded the voiceover, the section windows
+    # are measured seconds of speech, not estimates — say so, and make them
+    # a hard requirement rather than a suggestion.
     storyboard = state.get("storyboard")
+    narration_segments = state.get("narration_segments") or []
+    narration_recorded = bool(narration_segments)
+
     if storyboard:
+        spoken = {seg["index"]: seg["audio_duration"] for seg in narration_segments}
         lines = []
         cursor = 0.0
         for i, section in enumerate(storyboard):
             start = cursor
             cursor += section["duration_seconds"]
             lines.append(
-                f"{i + 1}. [{start:.0f}s–{cursor:.0f}s] {section['title']}\n"
+                f"{i + 1}. [{start:.1f}s–{cursor:.1f}s] {section['title']}\n"
                 f"   Visuals: {section['visuals']}\n"
                 f"   Narration: {section['narration']}"
+                + (f"\n   Spoken audio: {spoken[i]:.1f}s (already recorded)"
+                   if i in spoken else "")
             )
-        storyboard_section = f"""
+        section_list = chr(10).join(lines)
+
+        if narration_recorded:
+            storyboard_section = f"""
+## STORYBOARD (THE NARRATION IS ALREADY RECORDED — MATCH IT EXACTLY)
+{section_list}
+
+The voiceover for every section above has ALREADY been synthesised, and the
+listed windows are its MEASURED length. The animation is being timed to the
+audio, not the other way round:
+
+- Section {{n}}'s animations plus self.wait() calls MUST total its window to
+  within half a second. Pad with self.wait() when the visuals finish early.
+- The total run time of construct() MUST come to {target_seconds} seconds.
+- Apply the CLEAR DESK rule between sections.
+- Do NOT output a transcript — the narration exists and is not yours to change.
+"""
+        else:
+            storyboard_section = f"""
 ## STORYBOARD (IMPLEMENT EXACTLY THESE SECTIONS AND DURATIONS)
-{chr(10).join(lines)}
+{section_list}
 
 - Each section's animations plus self.wait() calls must fill its allotted time window.
 - Apply the CLEAR DESK rule between sections.
@@ -646,6 +675,38 @@ accurate, current, and informative:
 """
     else:
         storyboard_section = ""
+
+    # The narration blocks are only asked for when nothing has recorded it yet.
+    if narration_recorded:
+        transcript_requirements = ""
+        transcript_response_block = ""
+    else:
+        transcript_requirements = f"""
+### 6. TRANSCRIPT / NARRATION (CRITICAL — NO SILENCE)
+- **The narration MUST cover the ENTIRE video duration with NO silent gaps longer than 3 seconds.**
+- Detail level: {depth_config["detail_level"]}
+- Add transcript entries {depth_config["transcript_density"]} — this is the MINIMUM density
+- Every visual change, animation, or concept must have accompanying narration
+- Start narration at timestamp 0 and continue until the very end of the video
+- If a section has a self.wait(), there MUST be narration during or right before it
+- Think of this as a voiceover for a YouTube educational video — continuous speaking
+"""
+        transcript_response_block = f"""
+```python
+# TRANSCRIPT_START
+transcript = {{
+    0: "Introduction text spoken at the start...",
+    3: "Continuing the explanation without gaps...",
+    8: "Every few seconds, add more narration...",
+    12: "Keep talking through the entire video...",
+    18: "No long silences — every section needs voice...",
+    25: "Wrap up with a concluding sentence...",
+    # MUST have entries {depth_config["transcript_density"]} covering the FULL {target_seconds} seconds
+    # NO gaps longer than 3 seconds between entries
+}}
+# TRANSCRIPT_END
+```
+"""
 
     prompt = f"""Create a Manim animation based on this request:
 
@@ -729,16 +790,7 @@ Use ONLY these correct APIs. DO NOT use deprecated syntax:
 - Positioning: `.move_to(point)`, `.next_to(obj, direction, buff=0.3)`
 - VGroup: `VGroup(obj1, obj2).arrange(DOWN, buff=0.3)`
 - Avoid: `ShowCreation` (use `Create`), `FadeInFromDown` (use `FadeIn` with shift)
-
-### 6. TRANSCRIPT / NARRATION (CRITICAL — NO SILENCE)
-- **The narration MUST cover the ENTIRE video duration with NO silent gaps longer than 3 seconds.**
-- Detail level: {depth_config["detail_level"]}
-- Add transcript entries {depth_config["transcript_density"]} — this is the MINIMUM density
-- Every visual change, animation, or concept must have accompanying narration
-- Start narration at timestamp 0 and continue until the very end of the video
-- If a section has a self.wait(), there MUST be narration during or right before it
-- Think of this as a voiceover for a YouTube educational video — continuous speaking
-
+{transcript_requirements}
 Here are some reference examples:
 
 {retrieved_context}
@@ -756,22 +808,7 @@ class YourSceneName(Scene):
         pass
 # CODE_END
 ```
-
-```python
-# TRANSCRIPT_START
-transcript = {{
-    0: "Introduction text spoken at the start...",
-    3: "Continuing the explanation without gaps...",
-    8: "Every few seconds, add more narration...",
-    12: "Keep talking through the entire video...",
-    18: "No long silences — every section needs voice...",
-    25: "Wrap up with a concluding sentence...",
-    # MUST have entries {depth_config["transcript_density"]} covering the FULL {target_seconds} seconds
-    # NO gaps longer than 3 seconds between entries
-}}
-# TRANSCRIPT_END
-```
-"""
+{transcript_response_block}"""
 
     messages = [
         {"role": "system", "content": state["system_message"]},
@@ -784,18 +821,19 @@ transcript = {{
         code = _extract_code_block(response_text)
 
         transcript = {}
-        transcript_match = re.search(
-            r'# TRANSCRIPT_START\n.*?transcript\s*=\s*(\{.*?\})\s*# TRANSCRIPT_END',
-            response_text,
-            re.DOTALL,
-        )
-        if transcript_match:
-            try:
-                transcript = ast.literal_eval(transcript_match.group(1))
-            except (SyntaxError, ValueError, NameError) as e:
-                warnings.append(f"Transcript could not be parsed, video will have no narration: {e}")
-        else:
-            warnings.append("LLM response contained no transcript block, video will have no narration")
+        if not narration_recorded:
+            transcript_match = re.search(
+                r'# TRANSCRIPT_START\n.*?transcript\s*=\s*(\{.*?\})\s*# TRANSCRIPT_END',
+                response_text,
+                re.DOTALL,
+            )
+            if transcript_match:
+                try:
+                    transcript = ast.literal_eval(transcript_match.group(1))
+                except (SyntaxError, ValueError, NameError) as e:
+                    warnings.append(f"Transcript could not be parsed, video will have no narration: {e}")
+            else:
+                warnings.append("LLM response contained no transcript block, video will have no narration")
 
         scene_match = re.search(r'class\s+(\w+)\s*\([^)]*Scene[^)]*\)', code)
         scene_class_name = scene_match.group(1) if scene_match else "GeneratedScene"
@@ -809,19 +847,24 @@ class GeneratedScene(Scene):
         self.play(Write(title))
         self.wait(2)
 '''
-        transcript = {0: f"Welcome to {state['scene_title']}"}
+        transcript = {} if narration_recorded else {0: f"Welcome to {state['scene_title']}"}
         scene_class_name = "GeneratedScene"
         warnings.append("LLM was unavailable, generated a placeholder title scene instead")
 
-    return {
+    result = {
         "code": code,
         "scene_class_name": scene_class_name,
-        "transcript": transcript,
         "retrieved_examples": example_ids,
         "retrieved_context": retrieved_context,
         "pipeline_warnings": warnings,
         "messages": [{"role": "assistant", "content": f"Generated code for {state['scene_title']}"}],
     }
+
+    # Recorded narration owns the transcript; do not overwrite it with an empty one.
+    if not narration_recorded:
+        result["transcript"] = transcript
+
+    return result
 
 
 # ============================================================================
