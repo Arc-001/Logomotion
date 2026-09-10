@@ -34,10 +34,11 @@ FROM base as deps
 WORKDIR /app
 
 # Copy requirements first for better caching
-COPY requirements.txt .
+COPY requirements.txt requirements.lock ./
 
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
+# Install from the lock file so an image built today matches one built last
+# month. tests/test_requirements.py keeps the two files from drifting.
+RUN pip install --no-cache-dir -r requirements.lock
 
 # Stage 3: Final image
 FROM deps as final
