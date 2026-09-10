@@ -307,3 +307,76 @@ class TestComputeRenderTimeout:
     @pytest.mark.parametrize("target", [0, None, -5])
     def test_missing_target_keeps_the_floor(self, target):
         assert compute_render_timeout(target, "m", 120) == 120
+
+
+class TestValidatorReadsTheAst:
+    """Pattern matching on raw source failed code that only mentioned an API."""
+
+    def _code(self, body):
+        return f"from manim import *\n\nclass MyScene(Scene):\n    def construct(self):\n{body}\n"
+
+    def test_removed_api_in_a_comment_is_not_an_error(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = self._code("        # do not use ShowCreation(...) here\n        pass")
+
+        assert validate_manim_code(code, "MyScene") is None
+
+    def test_removed_api_in_a_docstring_is_not_an_error(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = self._code('        """Prefer Create over Code(...) and TextMobject(...)."""\n        pass')
+
+        assert validate_manim_code(code, "MyScene") is None
+
+    def test_removed_api_actually_called_is_still_an_error(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = self._code("        self.play(ShowCreation(Circle()))")
+
+        assert "ShowCreation" in validate_manim_code(code, "MyScene")
+
+    def test_scene_name_inside_a_string_does_not_satisfy_the_class_check(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = 'from manim import *\n\nname = "class MyScene(Scene)"\n'
+
+        assert "not defined" in validate_manim_code(code, "MyScene")
+
+    def test_manim_mentioned_in_a_string_does_not_satisfy_the_import_check(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = 'note = "from manim import *"\n\nclass MyScene:\n    pass\n'
+
+        assert "Missing manim import" in validate_manim_code(code, "MyScene")
+
+
+class TestFailedRenderIsCleanedUpImmediately:
+    def test_executor_cleanup_is_called_and_no_temp_dir_is_registered(self, monkeypatch):
+        from src.agent import nodes
+
+        cleaned = []
+
+        class _FailingExecutor:
+            def __init__(self, **kwargs):
+                pass
+
+            def execute(self, code, scene_class_name, orientation="landscape"):
+                return ExecutionResult(
+                    success=False, video_path=None, error="boom",
+                    stdout="", stderr="", code_path="/tmp/manim_exec_x/scene.py",
+                    output_dir="/tmp/manim_exec_x/media",
+                )
+
+            def cleanup(self, result):
+                cleaned.append(result.code_path)
+
+        monkeypatch.setattr(nodes, "ManimExecutor", _FailingExecutor)
+        state = {"code": "x", "scene_class_name": "MyScene", "render_quality": "m",
+                 "scene_length": 1.0, "target_duration": 60.0}
+
+        result = nodes.code_executor_node(state)
+
+        assert cleaned == ["/tmp/manim_exec_x/scene.py"]
+        assert "temp_dirs" not in result
+        assert result["error"] == "boom"

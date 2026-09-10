@@ -915,12 +915,16 @@ def code_executor_node(state: VideoGenState) -> dict:
         }
 
     print(f"[EXECUTOR] Render FAILED: {(result.error or '')[:200]}...")
+
+    # A failed attempt leaves a media dir behind that nothing will read again.
+    # Dropping it now keeps peak disk to one render instead of one per retry.
+    executor.cleanup(result)
+
     return {
         "error": result.error,
         "error_count": 1,
         "render_logs": f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}",
         "temp_code_path": result.code_path,
-        "temp_dirs": exec_temp_dirs,
     }
 
 

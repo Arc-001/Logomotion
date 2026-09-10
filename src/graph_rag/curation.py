@@ -14,7 +14,12 @@ import re
 import sys
 from typing import Optional
 
-from ..manim_runner.validator import REMOVED_APIS
+from ..manim_runner.validator import (
+    REMOVED_APIS,
+    called_names,
+    has_scene_class,
+    import_roots,
+)
 
 # Third-party packages an example may import on top of the standard library.
 # Anything else is a helper module that lived beside the original file and
@@ -36,44 +41,6 @@ _LOCAL_ASSET_RE = re.compile(
 )
 
 
-def _import_roots(tree: ast.AST) -> set[str]:
-    """Top-level package name of every import in the module."""
-    roots = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                roots.add(alias.name.split(".")[0])
-        elif isinstance(node, ast.ImportFrom):
-            if node.level:  # relative import — depends on a package we don't have
-                roots.add(node.module.split(".")[0] if node.module else ".")
-            elif node.module:
-                roots.add(node.module.split(".")[0])
-    return roots
-
-
-def _called_names(tree: ast.AST) -> set[str]:
-    """Names used in call position, e.g. ``ShowCreation(...)`` -> ShowCreation."""
-    names = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            func = node.func
-            if isinstance(func, ast.Name):
-                names.add(func.id)
-            elif isinstance(func, ast.Attribute):
-                names.add(func.attr)
-    return names
-
-
-def _has_scene_class(tree: ast.AST) -> bool:
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ClassDef):
-            for base in node.bases:
-                name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
-                if name.endswith("Scene"):
-                    return True
-    return False
-
-
 def example_rejection_reason(code: str) -> Optional[str]:
     """Why this example must not be shown to the generator, or None if it is fine."""
     if not code or not code.strip():
@@ -84,10 +51,10 @@ def example_rejection_reason(code: str) -> Optional[str]:
     except SyntaxError as e:
         return f"does not parse ({e.msg})"
 
-    if not _has_scene_class(tree):
+    if not has_scene_class(tree):
         return "no Scene subclass"
 
-    roots = _import_roots(tree)
+    roots = import_roots(tree)
 
     wrong_library = sorted(roots & _WRONG_LIBRARY_ROOTS)
     if wrong_library:
@@ -100,7 +67,7 @@ def example_rejection_reason(code: str) -> Optional[str]:
     if foreign:
         return f"imports unavailable module(s): {', '.join(foreign)}"
 
-    removed = sorted(_called_names(tree) & set(REMOVED_APIS))
+    removed = sorted(called_names(tree) & set(REMOVED_APIS))
     if removed:
         return f"uses removed Manim API: {', '.join(removed)}"
 

@@ -8,7 +8,6 @@ ffprobe operations.
 
 import ast
 import json
-import re
 import subprocess
 from pathlib import Path
 from dataclasses import dataclass
@@ -26,20 +25,64 @@ REMOVED_APIS = {
     "Code": "Do not use the Code() class; use Text() with a monospace font",
 }
 
-_LEGACY_API_PATTERNS = [
-    (rf"\b{name}\s*\(", message) for name, message in REMOVED_APIS.items()
-]
+def import_roots(tree: ast.AST) -> set:
+    """Top-level package name of every import in the module."""
+    roots = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                roots.add(alias.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:  # relative import — depends on a package we don't have
+                roots.add(node.module.split(".")[0] if node.module else ".")
+            elif node.module:
+                roots.add(node.module.split(".")[0])
+    return roots
+
+
+def called_names(tree: ast.AST) -> set:
+    """Names used in call position, e.g. ``ShowCreation(...)`` -> ShowCreation."""
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Name):
+                names.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                names.add(func.attr)
+    return names
+
+
+def defined_classes(tree: ast.AST) -> set:
+    """Every class name defined in the module."""
+    return {node.name for node in ast.walk(tree) if isinstance(node, ast.ClassDef)}
+
+
+def has_scene_class(tree: ast.AST) -> bool:
+    """Whether the module defines a class inheriting from some kind of Scene."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            for base in node.bases:
+                name = base.id if isinstance(base, ast.Name) else getattr(base, "attr", "")
+                if name.endswith("Scene"):
+                    return True
+    return False
 
 
 def validate_manim_code(code: str, scene_class_name: str) -> Optional[str]:
     """
     Run cheap static checks on generated code before spending a render on it.
 
+    Every check reads the parsed module rather than the raw text: matching
+    patterns against the source meant a docstring or comment that merely
+    mentioned ``Code(`` or ``ShowCreation(`` failed the render before manim
+    was ever invoked.
+
     Returns an actionable error message suitable for feeding back to the
     code corrector, or None when the code looks runnable.
     """
     try:
-        ast.parse(code)
+        tree = ast.parse(code)
     except SyntaxError as e:
         offending = (e.text or "").strip()
         message = f"SyntaxError on line {e.lineno}: {e.msg}"
@@ -47,13 +90,15 @@ def validate_manim_code(code: str, scene_class_name: str) -> Optional[str]:
             message += f"\n    {offending}"
         return message
 
-    if not re.search(rf"\bclass\s+{re.escape(scene_class_name)}\b", code):
+    if scene_class_name not in defined_classes(tree):
         return f"Scene class '{scene_class_name}' is not defined in the code"
 
-    if "from manim import" not in code and "import manim" not in code:
+    if "manim" not in import_roots(tree):
         return "Missing manim import (add 'from manim import *')"
 
-    problems = [msg for pattern, msg in _LEGACY_API_PATTERNS if re.search(pattern, code)]
+    problems = [
+        REMOVED_APIS[name] for name in sorted(called_names(tree) & set(REMOVED_APIS))
+    ]
     if problems:
         return "Forbidden or removed API usage:\n- " + "\n- ".join(problems)
 
