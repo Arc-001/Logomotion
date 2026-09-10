@@ -949,6 +949,26 @@ def recorrector_node(state: VideoGenState) -> dict:
     print(f"[RECORRECTOR] Attempt {error_count + 1} to fix error")
     print(f"[RECORRECTOR] Error: {state.get('error', 'unknown')[:200]}...")
 
+    # Without the earlier rounds the corrector sees each failure as the first
+    # one and can keep re-applying a fix that has already been shown not to
+    # work. Show it what it already tried.
+    history = state.get("fix_history") or []
+    if history:
+        previous = "\n".join(
+            f"Attempt {entry['attempt']} tried to fix:\n{entry['error']}"
+            for entry in history
+        )
+        history_block = f"""
+This is not the first attempt. Earlier rounds on this same code:
+
+{previous}
+
+Those fixes did not resolve the problem below. Do not repeat them — if an
+earlier approach was wrong, take a different one.
+"""
+    else:
+        history_block = ""
+
     messages = [
         {"role": "system", "content": """You are an expert at debugging Manim code for Manim v0.18+.
 
@@ -975,7 +995,7 @@ Error message:
 ```
 {state["error"][:2000]}
 ```
-
+{history_block}
 Please fix the code and return the complete corrected version.
 Only return the Python code, nothing else.
 """}
@@ -991,6 +1011,10 @@ Only return the Python code, nothing else.
     return {
         "code": fixed_code.strip(),
         "error": None,
+        "fix_history": [{
+            "attempt": error_count + 1,
+            "error": str(state.get("error", ""))[:500],
+        }],
         "messages": [{"role": "assistant", "content": "Fixed code based on error feedback"}],
     }
 

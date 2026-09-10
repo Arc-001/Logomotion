@@ -1096,3 +1096,66 @@ class TestCoordinateSystemGuidance:
 
         assert "ax.c2p" in state["system_message"]
         assert "EXCEPTION" in state["system_message"]
+
+
+class TestRecorrectorHistory:
+    def _capture(self, monkeypatch, state):
+        from src.agent import nodes
+
+        captured = {}
+
+        def fake_llm(messages, temperature=0.1):
+            captured["prompt"] = messages[1]["content"]
+            return "```python\nfixed = True\n```"
+
+        monkeypatch.setattr(nodes, "llm_chat", fake_llm)
+        result = nodes.recorrector_node(state)
+        return captured["prompt"], result
+
+    def test_first_attempt_carries_no_history_block(self, monkeypatch):
+        prompt, result = self._capture(
+            monkeypatch, {"code": "x = 1", "error": "NameError: y", "error_count": 0}
+        )
+
+        assert "not the first attempt" not in prompt
+        assert result["fix_history"] == [{"attempt": 1, "error": "NameError: y"}]
+
+    def test_later_attempts_see_what_was_already_tried(self, monkeypatch):
+        prompt, result = self._capture(
+            monkeypatch,
+            {
+                "code": "x = 1",
+                "error": "TypeError: bad tip_length",
+                "error_count": 2,
+                "fix_history": [
+                    {"attempt": 1, "error": "AttributeError: no ShowCreation"},
+                    {"attempt": 2, "error": "TypeError: unexpected length="},
+                ],
+            },
+        )
+
+        assert "not the first attempt" in prompt
+        assert "Attempt 1 tried to fix:\nAttributeError: no ShowCreation" in prompt
+        assert "Attempt 2 tried to fix:\nTypeError: unexpected length=" in prompt
+        assert "Do not repeat them" in prompt
+
+    def test_history_entry_appends_rather_than_replaces(self, monkeypatch):
+        """fix_history uses an add reducer, so a node returns only its own entry."""
+        _, result = self._capture(
+            monkeypatch,
+            {
+                "code": "x = 1",
+                "error": "boom",
+                "error_count": 1,
+                "fix_history": [{"attempt": 1, "error": "earlier"}],
+            },
+        )
+
+        assert result["fix_history"] == [{"attempt": 2, "error": "boom"}]
+
+    def test_long_errors_are_truncated_in_history(self, monkeypatch):
+        _, result = self._capture(
+            monkeypatch, {"code": "x = 1", "error": "E" * 900, "error_count": 0}
+        )
+
+        assert len(result["fix_history"][0]["error"]) == 500

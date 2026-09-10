@@ -85,6 +85,11 @@ class VideoGenState(TypedDict):
     error: Optional[str]
     error_count: Annotated[int, add]  # Tracks retry attempts
     max_retries: int
+
+    # One entry per correction round: the error that round was asked to fix.
+    # Fed back to the corrector so it cannot keep re-applying a fix that has
+    # already been shown not to work.
+    fix_history: Annotated[list[dict], add]
     
     temp_code_path: Optional[str]
     rendered_video_path: Optional[str]
@@ -239,6 +244,7 @@ def create_initial_state(
         error=None,
         error_count=0,
         max_retries=max_retries,
+        fix_history=[],
         
         temp_code_path=None,
         rendered_video_path=None,
