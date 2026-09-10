@@ -9,6 +9,7 @@ matching how `video_code_gen_node` imports it lazily inside the function.
 """
 
 import shutil
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -20,6 +21,7 @@ from src.agent.nodes import (
     _build_atempo_chain,
     _cleanup_temp_artifacts,
     _finish_merge,
+    audio_video_merger_node,
     video_code_gen_node,
     recorrector_node,
     should_retry_or_continue,
@@ -965,3 +967,71 @@ class TestPreRecordedNarrationPrompt:
         assert "TRANSCRIPT_START" in prompt
         assert "TRANSCRIPT / NARRATION" in prompt
         assert "transcript" in result
+
+
+# ============================================================================
+# audio_video_merger_node — timeline integrity
+# ============================================================================
+
+FFMPEG = shutil.which("ffmpeg") and shutil.which("ffprobe")
+
+
+def _make_silent_video(path, seconds):
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=black:s=160x120:d={seconds}",
+         "-r", "10", "-pix_fmt", "yuv420p", str(path)],
+        capture_output=True, check=True,
+    )
+
+
+def _make_tone(path, seconds):
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+         "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", str(path)],
+        capture_output=True, check=True,
+    )
+
+
+@pytest.mark.skipif(not FFMPEG, reason="ffmpeg/ffprobe not installed")
+class TestAudioVideoMergerTimeline:
+    @pytest.fixture
+    def workdir(self):
+        d = Path(tempfile.mkdtemp(prefix="manim_merge_test_"))
+        yield d
+        shutil.rmtree(d, ignore_errors=True)
+
+    def _run(self, workdir, video_seconds, timed_clips):
+        """timed_clips: list of (timestamp, clip_seconds)."""
+        video = workdir / "video.mp4"
+        _make_silent_video(video, video_seconds)
+
+        sections = []
+        for i, (ts, clip_seconds) in enumerate(timed_clips):
+            wav = workdir / f"seg_{i}.wav"
+            _make_tone(wav, clip_seconds)
+            sections.append({"timestamp": ts, "text": f"line {i}", "audio_path": str(wav)})
+
+        state = {
+            "synced_video_path": str(video),
+            "audio_segments": [s["audio_path"] for s in sections],
+            "transcript_sections": sections,
+            "temp_dirs": [],
+        }
+        result = audio_video_merger_node(state)
+        if result.get("final_output_path"):
+            Path(result["final_output_path"]).unlink(missing_ok=True)
+        return result
+
+    def test_narration_past_the_video_end_is_reported(self, workdir):
+        # 6s video, but the last two lines start at 8s and 12s
+        result = self._run(workdir, 6, [(0.0, 1.0), (8.0, 1.0), (12.0, 1.0)])
+
+        warnings = result.get("pipeline_warnings") or []
+        assert any("fell past the end" in w for w in warnings), warnings
+        assert any("2 narration line(s)" in w for w in warnings), warnings
+
+    def test_segments_within_bounds_produce_no_warning(self, workdir):
+        result = self._run(workdir, 10, [(0.0, 1.0), (3.0, 1.0), (6.0, 1.0)])
+
+        assert not (result.get("pipeline_warnings") or [])
+        assert result["final_output_path"] is not None
