@@ -308,18 +308,26 @@ async def _generate_into_job(
     """Run one generation and record its outcome against the job."""
     from .agent.graph import generate_video
 
+    timeout = get_settings().job_timeout
+
     try:
-        result = await generate_video(
-            scene_title=title or "Generated Scene",
-            scene_prompt_description=prompt,
-            scene_length=length,
-            explanation_depth=depth,
-            orientation=orientation,
-            duration_mode=duration_mode,
-            web_search_enabled=web_search,
-            render_quality=quality,
-            render_fps=fps,
-            visual_qa=visual_qa,
+        # Only the per-render subprocess was bounded, so a hung LLM call or a
+        # stuck retry loop kept a job "running" with no way for a client to
+        # tell it apart from one that was simply slow.
+        result = await asyncio.wait_for(
+            generate_video(
+                scene_title=title or "Generated Scene",
+                scene_prompt_description=prompt,
+                scene_length=length,
+                explanation_depth=depth,
+                orientation=orientation,
+                duration_mode=duration_mode,
+                web_search_enabled=web_search,
+                render_quality=quality,
+                render_fps=fps,
+                visual_qa=visual_qa,
+            ),
+            timeout=timeout,
         )
 
         video_path = result.get("final_output_path") or result.get("rendered_video_path")
@@ -344,6 +352,12 @@ async def _generate_into_job(
                 error=error or "Unknown error",
                 warnings=warnings,
             )
+    except asyncio.TimeoutError:
+        jobs[job_id] = JobStatus(
+            job_id=job_id,
+            status="failed",
+            error=f"Generation exceeded the {timeout}s job timeout and was abandoned",
+        )
     except Exception as e:
         jobs[job_id] = JobStatus(
             job_id=job_id,

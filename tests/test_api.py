@@ -151,3 +151,42 @@ class TestGenerateRequestDefaults:
 
     def test_quality_names_are_normalised(self):
         assert GenerateRequest(prompt="x", quality="high").quality == "h"
+
+
+class TestJobTimeout:
+    """Only the per-render subprocess was bounded; a hung LLM call kept a job
+    "running" forever."""
+
+    def _run(self, monkeypatch, generate, timeout=0.05):
+        from src.config import Settings
+
+        settings = Settings(job_timeout=timeout)
+        monkeypatch.setattr(api, "get_settings", lambda: settings)
+
+        import src.agent.graph as graph_module
+        monkeypatch.setattr(graph_module, "generate_video", generate)
+
+        _queue("slow")
+        asyncio.run(api._generate_into_job(
+            "slow", "p", None, 1.0, "detailed", "landscape", "guide",
+            False, None, None, None,
+        ))
+        return api.jobs["slow"]
+
+    def test_a_hung_generation_fails_the_job(self, monkeypatch):
+        async def never_finishes(**kwargs):
+            await asyncio.sleep(10)
+
+        job = self._run(monkeypatch, never_finishes)
+
+        assert job.status == "failed"
+        assert "job timeout" in job.error
+
+    def test_a_generation_that_finishes_in_time_is_unaffected(self, monkeypatch):
+        async def finishes(**kwargs):
+            return {"final_output_path": "/tmp/out.mp4", "code": "x"}
+
+        job = self._run(monkeypatch, finishes, timeout=5)
+
+        assert job.status == "completed"
+        assert job.video_path == "/tmp/out.mp4"
