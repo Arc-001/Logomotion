@@ -252,11 +252,34 @@ class ManimIndexer(GraphRAGClients):
         self._write_batch([row])
         return row["id"]
 
-    def index_directory(self, data_dir: str, pattern: str = "*.jsonl"):
+    def reset(self) -> None:
+        """Drop every indexed example so the store can be rebuilt from scratch.
+
+        Curation only changes what a *new* indexing run writes; entries an
+        earlier run already stored stay until they are deleted. Known classes
+        and animations are seeded state, not example data, so they survive.
+        """
+        print("Clearing indexed examples...")
+
+        with self.neo4j_driver.session() as session:
+            session.run("MATCH (e:Example) DETACH DELETE e")
+            session.run("MATCH (c:Concept) DETACH DELETE c")
+
+        if self.chroma_client:
+            try:
+                self.chroma_client.delete_collection("manim_examples")
+            except Exception as e:
+                print(f"  ChromaDB collection not dropped ({e}); continuing")
+            self._collection = None  # recreated on next access
+
+    def index_directory(self, data_dir: str, pattern: str = "*.jsonl", rebuild: bool = False):
         """Index all JSONL files in a directory."""
         data_path = Path(data_dir)
         if not data_path.exists():
             raise ValueError(f"Directory not found: {data_dir}")
+
+        if rebuild:
+            self.reset()
 
         print("Initializing schema...")
         self.init_schema()

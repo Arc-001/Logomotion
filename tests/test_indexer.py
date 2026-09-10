@@ -129,3 +129,39 @@ class TestWriteBatch:
 
         assert returned == "solo"
         assert indexer._collection.upserts[0]["ids"] == ["solo"]
+
+
+class _RecordingChromaClient:
+    def __init__(self, fail=False):
+        self.deleted = []
+        self.fail = fail
+
+    def delete_collection(self, name):
+        if self.fail:
+            raise RuntimeError("collection does not exist")
+        self.deleted.append(name)
+
+
+class TestReset:
+    def test_deletes_examples_and_concepts_but_not_seeded_entities(self, indexer):
+        indexer._chroma_client = _RecordingChromaClient()
+        indexer.reset()
+
+        queries = [q for q, _ in indexer._neo4j_driver.queries]
+        assert queries == [
+            "MATCH (e:Example) DETACH DELETE e",
+            "MATCH (c:Concept) DETACH DELETE c",
+        ]
+
+    def test_drops_the_chroma_collection_and_forgets_the_handle(self, indexer):
+        indexer._chroma_client = _RecordingChromaClient()
+        indexer.reset()
+
+        assert indexer._chroma_client.deleted == ["manim_examples"]
+        assert indexer._collection is None
+
+    def test_a_missing_collection_is_not_fatal(self, indexer):
+        indexer._chroma_client = _RecordingChromaClient(fail=True)
+        indexer.reset()  # must not raise
+
+        assert indexer._collection is None

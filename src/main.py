@@ -24,7 +24,7 @@ def cmd_index(args):
 
     indexer = ManimIndexer()
     try:
-        count = indexer.index_directory(args.data)
+        count = indexer.index_directory(args.data, rebuild=args.rebuild)
         print(f"\n✓ Successfully indexed {count} examples")
     finally:
         indexer.close()
@@ -124,6 +124,11 @@ def main():
         "--data", "-d",
         required=True,
         help="Path to directory containing JSONL files",
+    )
+    index_parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Drop every indexed example first (needed after curation rules change)",
     )
 
     gen_parser = subparsers.add_parser("generate", help="Generate a Manim video")
