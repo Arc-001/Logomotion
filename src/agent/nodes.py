@@ -34,7 +34,7 @@ except ImportError:
 from .state import VideoGenState, TranscriptSection
 from ..config import get_settings
 from ..graph_rag.schema import KNOWN_MANIM_CLASSES, KNOWN_ANIMATIONS
-from ..manim_runner.executor import ManimExecutor
+from ..manim_runner.executor import ManimExecutor, compute_render_timeout
 from ..manim_runner.validator import VideoValidator, get_video_duration
 
 
@@ -886,10 +886,15 @@ def code_executor_node(state: VideoGenState) -> dict:
     print(f"[EXECUTOR] Starting Manim render for scene: {scene_class}")
 
     settings = get_settings()
+    quality = state.get("render_quality") or settings.render_quality
+    target_seconds = state.get("target_duration") or state.get("scene_length", 1.0) * 60
+    timeout = compute_render_timeout(target_seconds, quality, settings.render_timeout)
+    print(f"[EXECUTOR] Quality {quality}, {target_seconds:.0f}s target, {timeout}s timeout")
+
     executor = ManimExecutor(
-        quality=state.get("render_quality") or settings.render_quality,
+        quality=quality,
         fps=state.get("render_fps"),
-        timeout=settings.render_timeout,
+        timeout=timeout,
     )
     result = executor.execute(
         code=state["code"],

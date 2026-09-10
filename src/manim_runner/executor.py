@@ -29,6 +29,31 @@ class ExecutionResult:
     output_dir: str
 
 
+# Rough wall-clock seconds of rendering per second of finished video, by
+# quality. Manim's cost scales with pixels times frames, so a fixed timeout
+# that suits a 30s 480p clip cannot also suit a 5-minute 1080p one.
+_TIMEOUT_PER_VIDEO_SECOND = {
+    "l": 1.0,
+    "m": 2.0,
+    "h": 4.0,
+    "p": 8.0,
+    "k": 16.0,
+}
+
+
+def compute_render_timeout(target_seconds: float, quality: str, floor: int) -> int:
+    """Seconds to allow a render of ``target_seconds`` of video at ``quality``.
+
+    ``floor`` (RENDER_TIMEOUT) stays the minimum, so short clips behave exactly
+    as before; longer or higher-quality targets get proportionally more time
+    instead of timing out on every attempt and burning the whole retry budget.
+    """
+    if not target_seconds or target_seconds <= 0:
+        return floor
+    factor = _TIMEOUT_PER_VIDEO_SECOND.get(quality, 2.0)
+    return int(max(floor, target_seconds * factor))
+
+
 # Portrait output resolution per quality flag, so portrait render cost
 # tracks the requested quality instead of always forcing 1080x1920.
 _PORTRAIT_RESOLUTIONS = {

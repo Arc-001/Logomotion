@@ -11,7 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from src.manim_runner.executor import ManimExecutor, ExecutionResult
+from src.manim_runner.executor import (
+    ManimExecutor,
+    ExecutionResult,
+    compute_render_timeout,
+)
 
 
 # ============================================================================
@@ -251,3 +255,25 @@ class TestValidateManimCode:
         assert result.success is False
         assert "SyntaxError" in result.error
         assert result.code_path == ""
+
+
+class TestComputeRenderTimeout:
+    """A fixed 120s ceiling could not cover the 30-minute videos the API accepts."""
+
+    def test_short_clips_keep_the_configured_floor(self):
+        assert compute_render_timeout(30, "m", 120) == 120
+
+    def test_long_targets_scale_past_the_floor(self):
+        # 5 minutes at 720p: 300s of video, 2s of rendering per second
+        assert compute_render_timeout(300, "m", 120) == 600
+
+    def test_higher_quality_costs_more_time(self):
+        assert compute_render_timeout(300, "h", 120) > compute_render_timeout(300, "m", 120)
+        assert compute_render_timeout(300, "m", 120) > compute_render_timeout(300, "l", 120)
+
+    def test_unknown_quality_falls_back_to_the_medium_factor(self):
+        assert compute_render_timeout(300, "z", 120) == compute_render_timeout(300, "m", 120)
+
+    @pytest.mark.parametrize("target", [0, None, -5])
+    def test_missing_target_keeps_the_floor(self, target):
+        assert compute_render_timeout(target, "m", 120) == 120
