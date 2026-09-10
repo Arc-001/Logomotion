@@ -103,6 +103,36 @@ class TestFindVideo:
 
         assert result is None
 
+    def test_partial_movie_files_are_never_chosen(self, tmp_path):
+        """Manim writes every animation as its own clip before stitching them;
+        returning one of those yields a fragment instead of the video."""
+        executor = ManimExecutor()
+        nested = tmp_path / "videos" / "scene" / "1080p30"
+        partials = nested / "partial_movie_files" / "MyScene"
+        partials.mkdir(parents=True)
+        (partials / "MyScene_0000.mp4").write_bytes(b"x")
+        target = nested / "MyScene.mp4"
+        target.write_bytes(b"x")
+
+        assert executor._find_video(tmp_path, "MyScene") == str(target)
+
+    def test_only_partial_movie_files_means_no_video(self, tmp_path):
+        executor = ManimExecutor()
+        partials = tmp_path / "videos" / "partial_movie_files" / "MyScene"
+        partials.mkdir(parents=True)
+        (partials / "MyScene_0000.mp4").write_bytes(b"x")
+
+        assert executor._find_video(tmp_path, "MyScene") is None
+
+    def test_falls_back_to_any_stitched_video(self, tmp_path):
+        executor = ManimExecutor()
+        nested = tmp_path / "videos" / "1080p30"
+        nested.mkdir(parents=True)
+        other = nested / "SomethingElse.mp4"
+        other.write_bytes(b"x")
+
+        assert executor._find_video(tmp_path, "MyScene") == str(other)
+
 
 # ============================================================================
 # cleanup

@@ -268,20 +268,29 @@ class ManimExecutor:
             )
     
     def _find_video(self, output_dir: Path, scene_name: str) -> Optional[str]:
-        """Find the rendered video file."""
+        """Find the rendered video file.
+
+        Manim writes each animation as its own clip under
+        ``partial_movie_files/`` before stitching them, and those are .mp4 too.
+        Picking one of those as the render output yields a fragment of a second
+        of video, so they are excluded before anything else is considered.
+        """
         if not output_dir.exists():
             return None
-        
-        video_files = list(output_dir.rglob("*.mp4"))
-        
+
+        video_files = [
+            vf for vf in output_dir.rglob("*.mp4")
+            if "partial_movie_files" not in vf.parts
+        ]
+
         if not video_files:
             return None
-        
+
         # Prefer file matching scene name
         for vf in video_files:
             if scene_name.lower() in vf.stem.lower():
                 return str(vf)
-        
+
         return str(video_files[0])
     
     def _parse_error(self, error_text: str) -> str:
