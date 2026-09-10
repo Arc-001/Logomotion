@@ -233,3 +233,62 @@ class TestSearchEndpoint:
         assert body["results"][0]["id"] == "e1"
         assert len(body["results"][0]["prompt"]) == 200
         assert body["results"][0]["classes"] == ["Circle"]
+
+
+class TestExplicitNullsAreAccepted:
+    """Omitting a field worked, but a client serialising "unset" as null got a
+    422 for a value the model validator was about to fill in anyway."""
+
+    @pytest.mark.parametrize("field", ["depth", "orientation", "duration_mode"])
+    def test_null_is_replaced_by_the_configured_default(self, field):
+        request = GenerateRequest(**{"prompt": "x", field: None})
+
+        assert getattr(request, field) is not None
+
+    @pytest.mark.parametrize("field", ["depth", "orientation", "duration_mode"])
+    def test_null_over_http_is_not_a_422(self, client, monkeypatch, field):
+        async def fake_run(job_id, *args, **kwargs):
+            pass
+
+        monkeypatch.setattr(api, "_run_generation_job", fake_run)
+
+        response = client.post("/generate", json={"topic": "x", field: None})
+
+        assert response.status_code == 200
+
+    def test_a_genuinely_invalid_value_is_still_rejected(self):
+        with pytest.raises(Exception):
+            GenerateRequest(prompt="x", depth="exhaustive")
+
+
+class TestJobEviction:
+    def _fill(self, count, status):
+        for i in range(count):
+            api.jobs[f"old-{i}"] = JobStatus(job_id=f"old-{i}", status=status)
+
+    def test_terminal_jobs_are_evicted_first(self, client, monkeypatch):
+        async def fake_run(job_id, *args, **kwargs):
+            pass
+
+        monkeypatch.setattr(api, "_run_generation_job", fake_run)
+        monkeypatch.setattr(api, "_MAX_JOBS", 4)
+        api.jobs["keep"] = JobStatus(job_id="keep", status="running")
+        self._fill(3, "completed")
+
+        client.post("/generate", json={"topic": "x"})
+
+        assert "keep" in api.jobs
+        assert len(api.jobs) <= 4
+
+    def test_a_store_full_of_running_jobs_still_gets_bounded(self, client, monkeypatch):
+        """Evicting only completed/failed made the cap a no-op here."""
+        async def fake_run(job_id, *args, **kwargs):
+            pass
+
+        monkeypatch.setattr(api, "_run_generation_job", fake_run)
+        monkeypatch.setattr(api, "_MAX_JOBS", 4)
+        self._fill(4, "running")
+
+        client.post("/generate", json={"topic": "x"})
+
+        assert len(api.jobs) == 4

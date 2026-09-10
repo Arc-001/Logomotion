@@ -55,15 +55,15 @@ class GenerateRequest(BaseModel):
         le=30.0,
         description="Target video length in minutes",
     )
-    depth: Literal["basic", "detailed", "comprehensive"] = Field(
+    depth: Optional[Literal["basic", "detailed", "comprehensive"]] = Field(
         default=None,
         description="How detailed the explanation should be",
     )
-    orientation: Literal["landscape", "portrait"] = Field(
+    orientation: Optional[Literal["landscape", "portrait"]] = Field(
         default=None,
         description="Video orientation: landscape (16:9) or portrait (9:16)",
     )
-    duration_mode: Literal["strict", "guide"] = Field(
+    duration_mode: Optional[Literal["strict", "guide"]] = Field(
         default=None,
         description="Duration enforcement: 'guide' = soft hint (default), 'strict' = ffmpeg speed adjust",
     )
@@ -169,13 +169,15 @@ async def generate_video(request: GenerateRequest, background_tasks: BackgroundT
     """
     job_id = str(uuid.uuid4())[:12]
 
-    # Evict oldest completed/failed jobs when store is full
+    # Evict oldest jobs when the store is full. Terminal jobs go first, but
+    # non-terminal ones are evictable too: restricting eviction to
+    # completed/failed made the cap a no-op as soon as that many jobs were
+    # stuck pending or running, and the store grew without bound.
     if len(jobs) >= _MAX_JOBS:
-        to_remove = [
-            jid for jid, j in jobs.items()
-            if j.status in ("completed", "failed")
-        ]
-        for jid in to_remove[:len(jobs) - _MAX_JOBS + 1]:
+        overflow = len(jobs) - _MAX_JOBS + 1
+        terminal = [jid for jid, j in jobs.items() if j.status in ("completed", "failed")]
+        remaining = [jid for jid in jobs if jid not in set(terminal)]
+        for jid in (terminal + remaining)[:overflow]:
             del jobs[jid]
 
     jobs[job_id] = JobStatus(
