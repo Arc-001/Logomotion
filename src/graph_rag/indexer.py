@@ -151,59 +151,106 @@ class ManimIndexer(GraphRAGClients):
 
             print(f"Seeded {len(KNOWN_MANIM_CLASSES)} classes and {len(KNOWN_ANIMATIONS)} animations")
 
-    def index_example(self, prompt: str, code: str, example_id: Optional[str] = None) -> str:
-        """Index a single example into both Neo4j and ChromaDB."""
-        example_id = example_id or self._generate_id(prompt + code)
-        scene_class = self._extract_scene_class(code)
-        used_classes = self._extract_used_classes(code)
-        used_animations = self._extract_used_animations(code)
-        concepts = self._extract_concepts(prompt)
+    # Examples per write batch. One ChromaDB upsert means one embedding HTTP
+    # call, so batching is the difference between ~1200 round trips and ~20.
+    BATCH_SIZE = 64
+
+    def _prepare_example(self, prompt: str, code: str, example_id: Optional[str] = None) -> dict:
+        """Extract everything an example contributes, without touching a database."""
+        return {
+            "id": example_id or self._generate_id(prompt + code),
+            "prompt": prompt,
+            "code": code,
+            "scene_class": self._extract_scene_class(code),
+            "used_classes": self._extract_used_classes(code),
+            "used_animations": self._extract_used_animations(code),
+            "concepts": self._extract_concepts(prompt),
+        }
+
+    def _write_batch(self, rows: list[dict]) -> None:
+        """Write a batch of prepared examples to Neo4j and ChromaDB.
+
+        Four Cypher statements for the whole batch rather than roughly ten per
+        example, and a single embedding call for all the documents.
+        """
+        if not rows:
+            return
+
+        class_pairs = [
+            {"id": row["id"], "name": name}
+            for row in rows for name in row["used_classes"]
+        ]
+        animation_pairs = [
+            {"id": row["id"], "name": name}
+            for row in rows for name in row["used_animations"]
+        ]
+        concept_pairs = [
+            {"id": row["id"], "name": name}
+            for row in rows for name in row["concepts"]
+        ]
 
         with self.neo4j_driver.session() as session:
             session.run("""
-                MERGE (e:Example {id: $id})
-                SET e.prompt = $prompt,
-                    e.code = $code,
-                    e.scene_class = $scene_class
-            """, id=example_id, prompt=prompt, code=code, scene_class=scene_class)
+                UNWIND $rows AS row
+                MERGE (e:Example {id: row.id})
+                SET e.prompt = row.prompt,
+                    e.code = row.code,
+                    e.scene_class = row.scene_class
+            """, rows=[
+                {k: row[k] for k in ("id", "prompt", "code", "scene_class")}
+                for row in rows
+            ])
 
-            for cls_name in used_classes:
+            if class_pairs:
                 session.run("""
-                    MATCH (e:Example {id: $example_id})
-                    MATCH (c:ManimClass {name: $class_name})
+                    UNWIND $pairs AS pair
+                    MATCH (e:Example {id: pair.id})
+                    MATCH (c:ManimClass {name: pair.name})
                     MERGE (e)-[:USES]->(c)
-                """, example_id=example_id, class_name=cls_name)
+                """, pairs=class_pairs)
 
-            for anim_name in used_animations:
+            if animation_pairs:
                 session.run("""
-                    MATCH (e:Example {id: $example_id})
-                    MATCH (a:Animation {name: $anim_name})
+                    UNWIND $pairs AS pair
+                    MATCH (e:Example {id: pair.id})
+                    MATCH (a:Animation {name: pair.name})
                     MERGE (e)-[:USES]->(a)
-                """, example_id=example_id, anim_name=anim_name)
+                """, pairs=animation_pairs)
 
-            for concept in concepts:
+            if concept_pairs:
                 session.run("""
-                    MERGE (c:Concept {name: $name})
-                    WITH c
-                    MATCH (e:Example {id: $example_id})
+                    UNWIND $pairs AS pair
+                    MERGE (c:Concept {name: pair.name})
+                    WITH c, pair
+                    MATCH (e:Example {id: pair.id})
                     MERGE (e)-[:DEMONSTRATES]->(c)
-                """, name=concept, example_id=example_id)
+                """, pairs=concept_pairs)
 
         if self.collection:
-            embedding_text = f"Prompt: {prompt}\nScene: {scene_class or 'Unknown'}\nUses: {', '.join(used_classes + used_animations)}"
-
             self.collection.upsert(
-                ids=[example_id],
-                documents=[embedding_text],
-                metadatas=[{
-                    "prompt": prompt[:1000],
-                    "scene_class": scene_class or "",
-                    "used_classes": ",".join(used_classes),
-                    "used_animations": ",".join(used_animations),
-                }]
+                ids=[row["id"] for row in rows],
+                documents=[
+                    f"Prompt: {row['prompt']}\n"
+                    f"Scene: {row['scene_class'] or 'Unknown'}\n"
+                    f"Uses: {', '.join(row['used_classes'] + row['used_animations'])}"
+                    for row in rows
+                ],
+                metadatas=[
+                    {
+                        "prompt": row["prompt"][:1000],
+                        "scene_class": row["scene_class"] or "",
+                        "used_classes": ",".join(row["used_classes"]),
+                        "used_animations": ",".join(row["used_animations"]),
+                    }
+                    for row in rows
+                ],
             )
 
-        return example_id
+    def index_example(self, prompt: str, code: str, example_id: Optional[str] = None) -> str:
+        """Index a single example into both Neo4j and ChromaDB."""
+        row = self._prepare_example(prompt, code, example_id)
+        self._write_batch([row])
+        return row["id"]
 
     def index_directory(self, data_dir: str, pattern: str = "*.jsonl"):
         """Index all JSONL files in a directory."""
@@ -223,6 +270,7 @@ class ManimIndexer(GraphRAGClients):
         total_indexed = 0
         total_skipped = 0
         skip_reasons: Counter = Counter()
+        batch: list[dict] = []
 
         for file_path in files:
             print(f"Processing {file_path.name}...")
@@ -239,17 +287,21 @@ class ManimIndexer(GraphRAGClients):
                     skip_reasons[reason.split(":")[0]] += 1
                     continue
 
-                self.index_example(
+                batch.append(self._prepare_example(
                     prompt=example["prompt"],
                     code=example["code"],
-                    example_id=self._generate_id(f"{file_path.name}:{example['line_num']}")
-                )
+                    example_id=self._generate_id(f"{file_path.name}:{example['line_num']}"),
+                ))
                 file_count += 1
                 total_indexed += 1
 
-                if total_indexed % 100 == 0:
+                if len(batch) >= self.BATCH_SIZE:
+                    self._write_batch(batch)
+                    batch = []
                     print(f"  Indexed {total_indexed} examples...")
 
+            self._write_batch(batch)
+            batch = []
             print(f"  Completed {file_path.name}: {file_count} indexed, {file_skipped} skipped")
 
         print(f"\nTotal indexed: {total_indexed} examples ({total_skipped} skipped)")
