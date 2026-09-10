@@ -1518,6 +1518,9 @@ def synchronizer_node(state: VideoGenState) -> dict:
 # NODE 7: Audio Video Merger (with ffmpeg)
 # ============================================================================
 
+# Speech faster than this stops being listenable, whatever the window says.
+_MAX_NARRATION_TEMPO = 1.25
+
 _TEMP_PREFIXES = ("manim_exec_", "manim_durfix_", "manim_merge_", "manim_frames_", "kokoro_")
 
 
@@ -1602,6 +1605,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
     print(f"[AUDIO MERGE] Transcript sections: {len(transcript_sections)}")
 
     merge_warnings: list[str] = []
+    capped_any = False
 
     if not video_path:
         print("[AUDIO MERGE] No video path provided")
@@ -1700,10 +1704,21 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
                 print(f"[AUDIO MERGE]   Segment {i} ({ts:.1f}s): could not measure duration, skipping")
                 continue
 
-            # 3. If audio overflows the window, speed it up
+            # 3. If audio overflows the window, speed it up — but only as far
+            # as speech stays listenable. Squeezing a line into an undersized
+            # window at 3-5x produced intelligible-on-paper, chipmunk-in-practice
+            # narration; past the cap the clip is allowed to run long instead,
+            # and the cursor resync below absorbs the overrun.
             processed_path = norm_path
             if clip_dur > window + 0.1:
-                speed_factor = clip_dur / window
+                needed = clip_dur / window
+                speed_factor = min(needed, _MAX_NARRATION_TEMPO)
+                if needed > _MAX_NARRATION_TEMPO and not capped_any:
+                    capped_any = True
+                    merge_warnings.append(
+                        f"Narration is denser than the animation allows; speech kept at "
+                        f"{_MAX_NARRATION_TEMPO}x rather than the {needed:.1f}x needed to fit"
+                    )
                 # atempo only supports 0.5 to 2.0 per stage; chain for extreme values
                 processed_path = Path(temp_dir) / f"fast_{i:03d}.wav"
                 atempo_filters = _build_atempo_chain(speed_factor)

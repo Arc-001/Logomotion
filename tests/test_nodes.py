@@ -1035,3 +1035,24 @@ class TestAudioVideoMergerTimeline:
 
         assert not (result.get("pipeline_warnings") or [])
         assert result["final_output_path"] is not None
+
+    def test_dense_narration_is_not_sped_up_past_the_cap(self, workdir):
+        from src.agent.nodes import _MAX_NARRATION_TEMPO
+
+        # 4s of speech crammed into a 1s window would need 4x to fit
+        result = self._run(workdir, 10, [(0.0, 4.0), (1.0, 0.5)])
+
+        warnings = result.get("pipeline_warnings") or []
+        assert any(f"{_MAX_NARRATION_TEMPO}x" in w for w in warnings), warnings
+        assert any("4.0x needed to fit" in w for w in warnings), warnings
+
+    def test_the_cap_is_only_reported_once(self, workdir):
+        result = self._run(workdir, 20, [(0.0, 4.0), (1.0, 4.0), (2.0, 4.0), (3.0, 0.5)])
+
+        warnings = [w for w in (result.get("pipeline_warnings") or []) if "speech kept at" in w]
+        assert len(warnings) == 1
+
+    def test_audio_that_fits_is_left_at_natural_speed(self, workdir):
+        result = self._run(workdir, 10, [(0.0, 1.0), (5.0, 1.0)])
+
+        assert not any("speech kept at" in w for w in (result.get("pipeline_warnings") or []))
