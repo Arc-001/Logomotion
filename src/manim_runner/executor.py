@@ -29,6 +29,31 @@ class ExecutionResult:
     output_dir: str
 
 
+# Rough wall-clock seconds of rendering per second of finished video, by
+# quality. Manim's cost scales with pixels times frames, so a fixed timeout
+# that suits a 30s 480p clip cannot also suit a 5-minute 1080p one.
+_TIMEOUT_PER_VIDEO_SECOND = {
+    "l": 1.0,
+    "m": 2.0,
+    "h": 4.0,
+    "p": 8.0,
+    "k": 16.0,
+}
+
+
+def compute_render_timeout(target_seconds: float, quality: str, floor: int) -> int:
+    """Seconds to allow a render of ``target_seconds`` of video at ``quality``.
+
+    ``floor`` (RENDER_TIMEOUT) stays the minimum, so short clips behave exactly
+    as before; longer or higher-quality targets get proportionally more time
+    instead of timing out on every attempt and burning the whole retry budget.
+    """
+    if not target_seconds or target_seconds <= 0:
+        return floor
+    factor = _TIMEOUT_PER_VIDEO_SECOND.get(quality, 2.0)
+    return int(max(floor, target_seconds * factor))
+
+
 # Portrait output resolution per quality flag, so portrait render cost
 # tracks the requested quality instead of always forcing 1080x1920.
 _PORTRAIT_RESOLUTIONS = {
@@ -243,20 +268,29 @@ class ManimExecutor:
             )
     
     def _find_video(self, output_dir: Path, scene_name: str) -> Optional[str]:
-        """Find the rendered video file."""
+        """Find the rendered video file.
+
+        Manim writes each animation as its own clip under
+        ``partial_movie_files/`` before stitching them, and those are .mp4 too.
+        Picking one of those as the render output yields a fragment of a second
+        of video, so they are excluded before anything else is considered.
+        """
         if not output_dir.exists():
             return None
-        
-        video_files = list(output_dir.rglob("*.mp4"))
-        
+
+        video_files = [
+            vf for vf in output_dir.rglob("*.mp4")
+            if "partial_movie_files" not in vf.parts
+        ]
+
         if not video_files:
             return None
-        
+
         # Prefer file matching scene name
         for vf in video_files:
             if scene_name.lower() in vf.stem.lower():
                 return str(vf)
-        
+
         return str(video_files[0])
     
     def _parse_error(self, error_text: str) -> str:

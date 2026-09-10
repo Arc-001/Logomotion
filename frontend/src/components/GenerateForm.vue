@@ -29,7 +29,7 @@
               v-model.number="form.length"
               type="range"
               min="0.1"
-              max="10"
+              max="30"
               step="0.1"
             />
             <span class="range-value">{{ form.length.toFixed(1) }}m</span>

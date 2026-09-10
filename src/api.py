@@ -5,6 +5,7 @@ Provides HTTP endpoints for video generation with full control
 over length, depth, and topic.
 """
 
+import asyncio
 import uuid
 from typing import Optional, Literal
 from pathlib import Path
@@ -54,15 +55,15 @@ class GenerateRequest(BaseModel):
         le=30.0,
         description="Target video length in minutes",
     )
-    depth: Literal["basic", "detailed", "comprehensive"] = Field(
+    depth: Optional[Literal["basic", "detailed", "comprehensive"]] = Field(
         default=None,
         description="How detailed the explanation should be",
     )
-    orientation: Literal["landscape", "portrait"] = Field(
+    orientation: Optional[Literal["landscape", "portrait"]] = Field(
         default=None,
         description="Video orientation: landscape (16:9) or portrait (9:16)",
     )
-    duration_mode: Literal["strict", "guide"] = Field(
+    duration_mode: Optional[Literal["strict", "guide"]] = Field(
         default=None,
         description="Duration enforcement: 'guide' = soft hint (default), 'strict' = ffmpeg speed adjust",
     )
@@ -131,6 +132,12 @@ class JobStatus(BaseModel):
 _MAX_JOBS = 1000
 jobs: dict[str, JobStatus] = {}
 
+# A generation job spends most of its life inside manim, ffmpeg and LaTeX
+# subprocesses. Nothing previously stopped a client from starting as many as
+# it liked, so jobs now queue here instead of trampling the host. Jobs waiting
+# for a slot stay "pending"; they become "running" once they hold one.
+_job_slots = asyncio.Semaphore(get_settings().max_concurrent_jobs)
+
 
 # ---------------------------------------------------------------------------
 # Endpoints
@@ -162,13 +169,15 @@ async def generate_video(request: GenerateRequest, background_tasks: BackgroundT
     """
     job_id = str(uuid.uuid4())[:12]
 
-    # Evict oldest completed/failed jobs when store is full
+    # Evict oldest jobs when the store is full. Terminal jobs go first, but
+    # non-terminal ones are evictable too: restricting eviction to
+    # completed/failed made the cap a no-op as soon as that many jobs were
+    # stuck pending or running, and the store grew without bound.
     if len(jobs) >= _MAX_JOBS:
-        to_remove = [
-            jid for jid, j in jobs.items()
-            if j.status in ("completed", "failed")
-        ]
-        for jid in to_remove[:len(jobs) - _MAX_JOBS + 1]:
+        overflow = len(jobs) - _MAX_JOBS + 1
+        terminal = [jid for jid, j in jobs.items() if j.status in ("completed", "failed")]
+        remaining = [jid for jid in jobs if jid not in set(terminal)]
+        for jid in (terminal + remaining)[:overflow]:
             del jobs[jid]
 
     jobs[job_id] = JobStatus(
@@ -232,27 +241,30 @@ async def download_video(job_id: str):
 
 @app.get("/search")
 async def search_examples(query: str, limit: int = 5):
-    """Search for similar Manim examples."""
-    from .graph_rag.retriever import ManimRetriever
+    """Search for similar Manim examples.
 
-    retriever = ManimRetriever()
-    try:
-        results = retriever.hybrid_search(query=query, limit=limit)
-        return {
-            "query": query,
-            "results": [
-                {
-                    "id": r.example_id,
-                    "prompt": r.prompt[:200],
-                    "score": r.score,
-                    "classes": r.used_classes,
-                    "animations": r.used_animations,
-                }
-                for r in results
-            ],
-        }
-    finally:
-        retriever.close()
+    hybrid_search is blocking Neo4j and ChromaDB I/O, so it runs in a worker
+    thread: running it inline stalled the whole event loop — including job
+    status polling and /health — for the length of the round trip.
+    """
+    from .graph_rag.retriever import get_retriever
+
+    results = await asyncio.to_thread(
+        lambda: get_retriever().hybrid_search(query=query, limit=limit)
+    )
+    return {
+        "query": query,
+        "results": [
+            {
+                "id": r.example_id,
+                "prompt": r.prompt[:200],
+                "score": r.score,
+                "classes": r.used_classes,
+                "animations": r.used_animations,
+            }
+            for r in results
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -275,20 +287,52 @@ async def _run_generation_job(
     """Background task to run video generation."""
     from .agent.graph import generate_video
 
-    jobs[job_id].status = "running"
+    async with _job_slots:
+        if job_id not in jobs:  # evicted or cancelled while queued
+            return
+        jobs[job_id].status = "running"
+        await _generate_into_job(
+            job_id, prompt, title, length, depth, orientation, duration_mode,
+            web_search, quality, fps, visual_qa,
+        )
+
+
+async def _generate_into_job(
+    job_id: str,
+    prompt: str,
+    title: Optional[str],
+    length: float,
+    depth: str,
+    orientation: str,
+    duration_mode: str,
+    web_search: bool,
+    quality: Optional[str],
+    fps: Optional[int],
+    visual_qa: Optional[bool],
+):
+    """Run one generation and record its outcome against the job."""
+    from .agent.graph import generate_video
+
+    timeout = get_settings().job_timeout
 
     try:
-        result = await generate_video(
-            scene_title=title or "Generated Scene",
-            scene_prompt_description=prompt,
-            scene_length=length,
-            explanation_depth=depth,
-            orientation=orientation,
-            duration_mode=duration_mode,
-            web_search_enabled=web_search,
-            render_quality=quality,
-            render_fps=fps,
-            visual_qa=visual_qa,
+        # Only the per-render subprocess was bounded, so a hung LLM call or a
+        # stuck retry loop kept a job "running" with no way for a client to
+        # tell it apart from one that was simply slow.
+        result = await asyncio.wait_for(
+            generate_video(
+                scene_title=title or "Generated Scene",
+                scene_prompt_description=prompt,
+                scene_length=length,
+                explanation_depth=depth,
+                orientation=orientation,
+                duration_mode=duration_mode,
+                web_search_enabled=web_search,
+                render_quality=quality,
+                render_fps=fps,
+                visual_qa=visual_qa,
+            ),
+            timeout=timeout,
         )
 
         video_path = result.get("final_output_path") or result.get("rendered_video_path")
@@ -313,6 +357,12 @@ async def _run_generation_job(
                 error=error or "Unknown error",
                 warnings=warnings,
             )
+    except asyncio.TimeoutError:
+        jobs[job_id] = JobStatus(
+            job_id=job_id,
+            status="failed",
+            error=f"Generation exceeded the {timeout}s job timeout and was abandoned",
+        )
     except Exception as e:
         jobs[job_id] = JobStatus(
             job_id=job_id,

@@ -68,6 +68,11 @@ class VideoGenState(TypedDict):
     storyboard_enabled: bool
     storyboard: Optional[list[dict]]  # [{title, duration_seconds, visuals, narration}]
 
+    # Narration synthesised up front, before any code exists. Each entry is
+    # {index, text, audio_path, audio_duration, timestamp} with a MEASURED
+    # duration, so section time budgets are real seconds rather than guesses.
+    narration_segments: list[dict]
+
     retrieved_examples: list[str]  # Code examples from Graph RAG
     retrieved_context: str  # Formatted context for LLM
     
@@ -80,6 +85,11 @@ class VideoGenState(TypedDict):
     error: Optional[str]
     error_count: Annotated[int, add]  # Tracks retry attempts
     max_retries: int
+
+    # One entry per correction round: the error that round was asked to fix.
+    # Fed back to the corrector so it cannot keep re-applying a fix that has
+    # already been shown not to work.
+    fix_history: Annotated[list[dict], add]
     
     temp_code_path: Optional[str]
     rendered_video_path: Optional[str]
@@ -164,14 +174,19 @@ def create_initial_state(
     - NEVER render new text or visuals on top of existing elements that are already on screen.
 
 ### RULE 2 — FORBIDDEN SYNTAX
-    - DO NOT use raw absolute coordinate arrays: NO `move_to([2, -1, 0])`, NO `move_to(np.array([x, y, 0]))`.
-    - These always produce miscalculated spacing and overlapping elements.
+    - DO NOT lay out elements with hard-coded literal coordinates: NO `move_to([2, -1, 0])`, NO `.shift(np.array([1.5, 0, 0]))`.
+    - Literal numbers guessed by eye produce miscalculated spacing and overlapping elements.
+    - EXCEPTION — coordinates that come from a coordinate system are REQUIRED, not forbidden:
+      `Dot(ax.c2p(2, 4))`, `label.move_to(ax.c2p(x, y))`, `ax.plot(lambda x: x**2)`.
+      Those are computed by Manim from the axes, not guessed, and are the correct
+      way to place anything that belongs on a graph.
 
 ### RULE 3 — MANDATORY RELATIVE POSITIONING
     - ONLY position elements relative to screen edges or to other mobjects.
     - Screen edges: `.to_edge(UP)`, `.to_edge(DOWN)`, `.to_edge(LEFT)`, `.to_edge(RIGHT)`.
     - Stacking: `.next_to(other_mobject, DOWN, buff=0.5)` to place elements sequentially.
     - Centering: `.move_to(ORIGIN)` is allowed (ORIGIN is a named constant, not a raw array).
+    - On a graph: position via the axes, e.g. `.move_to(ax.c2p(x, y))` or `.next_to(ax.c2p(x, y), UP)`.
     - The Manim frame is {frame_desc}.
     - {layout_hint}
 
@@ -215,6 +230,7 @@ def create_initial_state(
 
         storyboard_enabled=storyboard_enabled,
         storyboard=None,
+        narration_segments=[],
 
         retrieved_examples=[],
         retrieved_context="",
@@ -228,6 +244,7 @@ def create_initial_state(
         error=None,
         error_count=0,
         max_retries=max_retries,
+        fix_history=[],
         
         temp_code_path=None,
         rendered_video_path=None,

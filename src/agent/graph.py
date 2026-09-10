@@ -16,6 +16,7 @@ from .nodes import (
     audio_video_merger_node,
     web_research_node,
     storyboard_node,
+    narration_tts_node,
     visual_qa_node,
     visual_recorrector_node,
     should_retry_or_continue,
@@ -29,39 +30,47 @@ def build_video_gen_graph() -> StateGraph:
     Build the complete LangGraph for video generation.
     
     Graph structure:
-    
+
     START
       │
       ├──web_search_enabled?──► [web_research] ──┐
-      │                                           │
-      └───────────────────────────────────────────┤
-                                                  ▼
-                                         [video_code_gen] ─────────────────┐
-                                           │                                │
-                                           │ code, transcript               │
-                                           ▼                                ▼
-                                         [code_executor]       [transcript_processor]
-                                           │                                │
-                                           ├──error?──► [recorrector]    │
-                                           │                               │
-                                           ▼ rendered video               │
-                                         [render_checker]                  │
-                                           │                               │
-                                           ├──duration off?──► [video_duration_fixer]
-                                           ▼                               │
-                                         [synchronizer] ◄──────────────────┘
-                                           │
-                                           ▼
-                                         [audio_video_merger]
-                                           │
-                                           ▼
-                                          END
+      │                                          │
+      └──────────────────────────────────────────┤
+                                                 ▼
+                                    [storyboard]  (plan timed sections)
+                                                 │
+                                    [narration_tts]  (record + MEASURE speech)
+                                                 │
+                                                 ▼
+                                        [video_code_gen] ────────────────┐
+                                          │                              │
+                                          │ code                         │ transcript
+                                          ▼                              ▼
+                                        [code_executor]      [transcript_processor]
+                                          │                   (no-op when narration
+                                          ├──error?──►          was pre-recorded)
+                                          │   [recorrector]                │
+                                          ├──visual QA?──►                 │
+                                          │   [visual_qa]/[visual_recorrector]
+                                          ▼                                │
+                                        [render_checker]                   │
+                                          │                                │
+                                          ├──duration off?──► [video_duration_fixer]
+                                          ▼                                │
+                                        [video_ready] ─────► [synchronizer] ◄┘
+                                                                   │
+                                                                   ▼
+                                                          [audio_video_merger]
+                                                                   │
+                                                                   ▼
+                                                                  END
     """
     builder = StateGraph(VideoGenState)
 
     # Register all nodes
     builder.add_node("web_research", web_research_node)
     builder.add_node("storyboard", storyboard_node)
+    builder.add_node("narration_tts", narration_tts_node)
     builder.add_node("video_code_gen", video_code_gen_node)
     builder.add_node("code_executor", code_executor_node)
     builder.add_node("recorrector", recorrector_node)
@@ -103,7 +112,10 @@ def build_video_gen_graph() -> StateGraph:
         },
     )
 
-    builder.add_edge("storyboard", "video_code_gen")
+    # Narration is recorded and measured before a line of code is written, so
+    # the code generator is given real seconds to fill instead of guesses.
+    builder.add_edge("storyboard", "narration_tts")
+    builder.add_edge("narration_tts", "video_code_gen")
 
     # After code generation, run both executor and transcript processor in parallel
     builder.add_edge("video_code_gen", "code_executor")

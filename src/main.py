@@ -24,7 +24,7 @@ def cmd_index(args):
 
     indexer = ManimIndexer()
     try:
-        count = indexer.index_directory(args.data)
+        count = indexer.index_directory(args.data, rebuild=args.rebuild)
         print(f"\n✓ Successfully indexed {count} examples")
     finally:
         indexer.close()
@@ -41,7 +41,10 @@ def cmd_generate(args):
 
     from .config import normalize_render_quality
 
-    scene_length = args.length if args.length != 1.0 else settings.video_length
+    # argparse default is None so an explicit "--length 1.0" is distinguishable
+    # from the flag being omitted; previously 1.0 doubled as the "not passed"
+    # sentinel and was silently replaced by VIDEO_LENGTH.
+    scene_length = args.length if args.length is not None else settings.video_length
     explanation_depth = args.depth or settings.explanation_depth
     orientation = args.orientation or settings.video_orientation
     duration_mode = args.duration_mode or settings.duration_mode
@@ -54,6 +57,7 @@ def cmd_generate(args):
     print(f"[CONFIG] Orientation: {orientation}")
     print(f"[CONFIG] Duration mode: {duration_mode}")
     print(f"[CONFIG] Render quality: {render_quality}" + (f", fps: {render_fps}" if render_fps else ""))
+    print(f"[CONFIG] Web research: {'on' if args.web_search else 'off'}")
 
     result = generate_video_sync(
         scene_title=args.title or "Generated Scene",
@@ -65,6 +69,7 @@ def cmd_generate(args):
         render_quality=render_quality,
         render_fps=render_fps,
         visual_qa=visual_qa,
+        web_search_enabled=args.web_search,
     )
 
     if result.get("final_output_path"):
@@ -125,6 +130,11 @@ def main():
         required=True,
         help="Path to directory containing JSONL files",
     )
+    index_parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="Drop every indexed example first (needed after curation rules change)",
+    )
 
     gen_parser = subparsers.add_parser("generate", help="Generate a Manim video")
     gen_parser.add_argument(
@@ -139,8 +149,8 @@ def main():
     gen_parser.add_argument(
         "--length", "-l",
         type=float,
-        default=1.0,
-        help="Target length in minutes (default: 1.0)",
+        default=None,
+        help="Target length in minutes (default: from .env or 1.0)",
     )
     gen_parser.add_argument(
         "--output", "-o",
@@ -181,6 +191,12 @@ def main():
         action="store_true",
         dest="visual_qa",
         help="Review rendered frames with the multimodal LLM and auto-fix layout problems",
+    )
+    gen_parser.add_argument(
+        "--web-search",
+        action="store_true",
+        dest="web_search",
+        help="Fetch latest web / Wikipedia data before generating the animation",
     )
 
     serve_parser = subparsers.add_parser("serve", help="Start the API server")

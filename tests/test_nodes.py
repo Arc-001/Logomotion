@@ -4,11 +4,12 @@ Tests for src.agent.nodes.
 These tests run with no live Neo4j/Chroma databases, no network access,
 and no OPENROUTER_API_KEY: every LLM call goes through a monkeypatched
 `llm_chat`, and the Graph RAG retriever is replaced with an in-memory stub
-patched at its source module (`src.graph_rag.retriever.ManimRetriever`),
+patched at its source module (`src.graph_rag.retriever.get_retriever`),
 matching how `video_code_gen_node` imports it lazily inside the function.
 """
 
 import shutil
+import subprocess
 import tempfile
 import uuid
 from pathlib import Path
@@ -20,6 +21,7 @@ from src.agent.nodes import (
     _build_atempo_chain,
     _cleanup_temp_artifacts,
     _finish_merge,
+    audio_video_merger_node,
     video_code_gen_node,
     recorrector_node,
     should_retry_or_continue,
@@ -121,7 +123,7 @@ class TestVideoCodeGenNode:
             "src.agent.nodes.llm_chat",
             lambda messages, temperature=0.2: CANNED_RESPONSE,
         )
-        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _EmptyRetriever())
 
         result = video_code_gen_node(_base_state())
 
@@ -139,7 +141,7 @@ class TestVideoCodeGenNode:
         monkeypatch.setattr(
             "src.agent.nodes.llm_chat", lambda messages, temperature=0.2: response
         )
-        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _EmptyRetriever())
 
         result = video_code_gen_node(_base_state())
 
@@ -150,7 +152,7 @@ class TestVideoCodeGenNode:
         monkeypatch.setattr(
             "src.agent.nodes.llm_chat", lambda messages, temperature=0.2: None
         )
-        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _EmptyRetriever())
 
         state = _base_state(scene_title="Fallback Title")
         result = video_code_gen_node(state)
@@ -164,7 +166,7 @@ class TestVideoCodeGenNode:
             "src.agent.nodes.llm_chat",
             lambda messages, temperature=0.2: CANNED_RESPONSE,
         )
-        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _RaisingRetriever)
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _RaisingRetriever())
 
         result = video_code_gen_node(_base_state())
 
@@ -178,7 +180,7 @@ class TestVideoCodeGenNode:
             "src.agent.nodes.llm_chat",
             lambda messages, temperature=0.2: CANNED_RESPONSE,
         )
-        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _EmptyRetriever())
 
         state = _base_state(
             explanation_depth="comprehensive",
@@ -592,7 +594,7 @@ class TestStoryboardPromptInjection:
             captured["prompt"] = messages[1]["content"]
             return None  # fall back to stub scene; we only care about the prompt
 
-        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _EmptyRetriever())
         monkeypatch.setattr(nodes, "llm_chat", fake_llm)
 
         state = _base_state()
@@ -604,8 +606,8 @@ class TestStoryboardPromptInjection:
 
         prompt = captured["prompt"]
         assert "STORYBOARD" in prompt
-        assert "[0s–10s] Intro" in prompt
-        assert "[10s–30s] Wrap" in prompt
+        assert "[0.0s–10.0s] Intro" in prompt
+        assert "[10.0s–30.0s] Wrap" in prompt
 
 
 # ============================================================================
@@ -750,3 +752,410 @@ class TestVisualRecorrectorNode:
         assert "code" not in result  # state code untouched
         assert result["visual_fix_count"] == 1
         assert any("fix failed" in w for w in result["pipeline_warnings"])
+
+
+# ============================================================================
+# narration_tts_node — narration is recorded and measured before code exists
+# ============================================================================
+
+class _StubTTSResult:
+    def __init__(self, duration, path="/tmp/kokoro_stub.wav", error=None):
+        self.success = error is None
+        self.audio_path = None if error else path
+        self.duration = duration
+        self.error = error
+
+
+class _StubTTS:
+    """Kokoro stand-in: speech length is proportional to the text length."""
+
+    def __init__(self, seconds_per_char=0.1, fail_on=()):
+        self.seconds_per_char = seconds_per_char
+        self.fail_on = fail_on
+        self.calls = []
+
+    def synthesize(self, text):
+        self.calls.append(text)
+        if text in self.fail_on:
+            return _StubTTSResult(None, error="synthesis exploded")
+        return _StubTTSResult(
+            duration=len(text) * self.seconds_per_char,
+            path=f"/tmp/kokoro_{len(self.calls):03d}.wav",
+        )
+
+
+class TestNarrationTtsNode:
+    def _state(self, storyboard, **overrides):
+        state = {
+            "scene_length": 1.0,
+            "target_duration": 60.0,
+            "storyboard": storyboard,
+        }
+        state.update(overrides)
+        return state
+
+    def _storyboard(self):
+        return [
+            {"title": "Intro", "duration_seconds": 10, "visuals": "v", "narration": "a" * 20},
+            {"title": "Body", "duration_seconds": 30, "visuals": "v", "narration": "b" * 50},
+            {"title": "Wrap", "duration_seconds": 20, "visuals": "v", "narration": "c" * 10},
+        ]
+
+    def test_section_budget_is_at_least_the_measured_speech(self, monkeypatch):
+        from src.agent import nodes
+
+        # 50 chars * 0.1 = 5.0s of speech, well under the 30s plan
+        monkeypatch.setattr(nodes, "_get_tts", lambda: _StubTTS())
+        result = nodes.narration_tts_node(self._state(self._storyboard()))
+
+        for section, segment in zip(result["storyboard"], result["narration_segments"]):
+            assert section["duration_seconds"] >= segment["audio_duration"]
+
+    def test_budget_grows_when_speech_overruns_the_plan(self, monkeypatch):
+        from src.agent import nodes
+
+        # 0.5s/char makes the 50-char middle section 25s of speech vs a 10s plan
+        monkeypatch.setattr(nodes, "_get_tts", lambda: _StubTTS(seconds_per_char=0.5))
+        storyboard = [
+            {"title": "Only", "duration_seconds": 10, "visuals": "v", "narration": "b" * 50},
+        ]
+        result = nodes.narration_tts_node(self._state(storyboard))
+
+        assert result["storyboard"][0]["duration_seconds"] == pytest.approx(26.0)
+        assert result["target_duration"] == pytest.approx(26.0)
+
+    def test_timestamps_are_cumulative_section_starts(self, monkeypatch):
+        from src.agent import nodes
+
+        monkeypatch.setattr(nodes, "_get_tts", lambda: _StubTTS())
+        result = nodes.narration_tts_node(self._state(self._storyboard()))
+
+        starts = [seg["timestamp"] for seg in result["narration_segments"]]
+        assert starts == [0.0, 10.0, 40.0]
+
+        sections = result["transcript_sections"]
+        assert [s["timestamp"] for s in sections] == starts
+        assert all(s["audio_path"] for s in sections)
+
+    def test_target_duration_is_the_sum_of_budgets(self, monkeypatch):
+        from src.agent import nodes
+
+        monkeypatch.setattr(nodes, "_get_tts", lambda: _StubTTS())
+        result = nodes.narration_tts_node(self._state(self._storyboard()))
+
+        assert result["target_duration"] == pytest.approx(60.0)
+
+    def test_warns_when_narration_stretches_the_video(self, monkeypatch):
+        from src.agent import nodes
+
+        monkeypatch.setattr(nodes, "_get_tts", lambda: _StubTTS(seconds_per_char=1.0))
+        result = nodes.narration_tts_node(self._state(self._storyboard()))
+
+        assert result["target_duration"] > 60.0
+        assert any("timed to the narration" in w for w in result["pipeline_warnings"])
+
+    def test_failed_segment_is_warned_and_skipped(self, monkeypatch):
+        from src.agent import nodes
+
+        storyboard = self._storyboard()
+        monkeypatch.setattr(
+            nodes, "_get_tts", lambda: _StubTTS(fail_on=(storyboard[1]["narration"],))
+        )
+        result = nodes.narration_tts_node(self._state(storyboard))
+
+        assert result["narration_segments"][1]["audio_path"] is None
+        assert len(result["audio_segments"]) == 2
+        assert any("section 2" in w for w in result["pipeline_warnings"])
+
+    def test_no_storyboard_is_a_no_op(self, monkeypatch):
+        from src.agent import nodes
+
+        monkeypatch.setattr(nodes, "_get_tts", lambda: _StubTTS())
+        assert nodes.narration_tts_node(self._state(None)) == {}
+
+    def test_tts_unavailable_falls_back_with_a_warning(self, monkeypatch):
+        from src.agent import nodes
+
+        monkeypatch.setattr(nodes, "_get_tts", lambda: None)
+        result = nodes.narration_tts_node(self._state(self._storyboard()))
+
+        assert "narration_segments" not in result
+        assert any("TTS unavailable" in w for w in result["pipeline_warnings"])
+
+
+class TestTranscriptProcessorSkipsPreRecordedNarration:
+    def test_no_op_when_narration_already_recorded(self, monkeypatch):
+        from src.agent import nodes
+
+        def _boom():
+            raise AssertionError("_get_tts must not be called")
+
+        monkeypatch.setattr(nodes, "_get_tts", _boom)
+        state = {
+            "narration_segments": [{"index": 0, "text": "hi", "audio_path": "/tmp/a.wav"}],
+            "transcript": {0: "hi"},
+        }
+        assert nodes.transcript_processor_node(state) == {}
+
+    def test_still_runs_on_the_single_shot_path(self, monkeypatch):
+        from src.agent import nodes
+
+        monkeypatch.setattr(nodes, "_get_tts", lambda: _StubTTS())
+        state = {"narration_segments": [], "transcript": {0: "hello", 5: "world"}}
+        result = nodes.transcript_processor_node(state)
+
+        assert [s["timestamp"] for s in result["transcript_sections"]] == [0.0, 5.0]
+        assert len(result["audio_segments"]) == 2
+
+
+class TestPreRecordedNarrationPrompt:
+    """With narration already recorded, code gen is timed to it and asks for no transcript."""
+
+    def _capture(self, monkeypatch, state):
+        from src.agent import nodes
+
+        captured = {}
+
+        def fake_llm(messages, temperature=0.2):
+            captured["prompt"] = messages[1]["content"]
+            return "```python\nfrom manim import *\n\nclass S(Scene):\n    def construct(self):\n        pass\n```"
+
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _EmptyRetriever())
+        monkeypatch.setattr(nodes, "llm_chat", fake_llm)
+        result = nodes.video_code_gen_node(state)
+        return captured["prompt"], result
+
+    def _state(self):
+        state = _base_state()
+        state["storyboard"] = [
+            {"title": "Intro", "duration_seconds": 12.5, "visuals": "title", "narration": "welcome"},
+            {"title": "Wrap", "duration_seconds": 7.5, "visuals": "summary", "narration": "bye"},
+        ]
+        state["narration_segments"] = [
+            {"index": 0, "text": "welcome", "audio_path": "/tmp/a.wav", "audio_duration": 11.5,
+             "timestamp": 0.0},
+            {"index": 1, "text": "bye", "audio_path": "/tmp/b.wav", "audio_duration": 6.5,
+             "timestamp": 12.5},
+        ]
+        state["target_duration"] = 20.0
+        return state
+
+    def test_prompt_states_the_measured_audio_and_forbids_a_transcript(self, monkeypatch):
+        prompt, _ = self._capture(monkeypatch, self._state())
+
+        assert "ALREADY been synthesised" in prompt
+        assert "Spoken audio: 11.5s (already recorded)" in prompt
+        assert "Spoken audio: 6.5s (already recorded)" in prompt
+        assert "TRANSCRIPT_START" not in prompt
+        assert "TRANSCRIPT / NARRATION" not in prompt
+
+    def test_prompt_targets_the_narration_derived_duration(self, monkeypatch):
+        prompt, _ = self._capture(monkeypatch, self._state())
+
+        assert "MUST come to 20 seconds" in prompt
+        assert "**Target Duration:** 20 seconds" in prompt
+
+    def test_node_does_not_publish_a_transcript(self, monkeypatch):
+        _, result = self._capture(monkeypatch, self._state())
+
+        assert "transcript" not in result
+
+    def test_single_shot_path_still_asks_for_a_transcript(self, monkeypatch):
+        state = _base_state()
+        prompt, result = self._capture(monkeypatch, state)
+
+        assert "TRANSCRIPT_START" in prompt
+        assert "TRANSCRIPT / NARRATION" in prompt
+        assert "transcript" in result
+
+
+# ============================================================================
+# audio_video_merger_node — timeline integrity
+# ============================================================================
+
+FFMPEG = shutil.which("ffmpeg") and shutil.which("ffprobe")
+
+
+def _make_silent_video(path, seconds):
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", f"color=c=black:s=160x120:d={seconds}",
+         "-r", "10", "-pix_fmt", "yuv420p", str(path)],
+        capture_output=True, check=True,
+    )
+
+
+def _make_tone(path, seconds):
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+         "-ar", "24000", "-ac", "1", "-c:a", "pcm_s16le", str(path)],
+        capture_output=True, check=True,
+    )
+
+
+@pytest.mark.skipif(not FFMPEG, reason="ffmpeg/ffprobe not installed")
+class TestAudioVideoMergerTimeline:
+    @pytest.fixture
+    def workdir(self):
+        d = Path(tempfile.mkdtemp(prefix="manim_merge_test_"))
+        yield d
+        shutil.rmtree(d, ignore_errors=True)
+
+    def _run(self, workdir, video_seconds, timed_clips):
+        """timed_clips: list of (timestamp, clip_seconds)."""
+        video = workdir / "video.mp4"
+        _make_silent_video(video, video_seconds)
+
+        sections = []
+        for i, (ts, clip_seconds) in enumerate(timed_clips):
+            wav = workdir / f"seg_{i}.wav"
+            _make_tone(wav, clip_seconds)
+            sections.append({"timestamp": ts, "text": f"line {i}", "audio_path": str(wav)})
+
+        state = {
+            "synced_video_path": str(video),
+            "audio_segments": [s["audio_path"] for s in sections],
+            "transcript_sections": sections,
+            "temp_dirs": [],
+        }
+        result = audio_video_merger_node(state)
+        if result.get("final_output_path"):
+            Path(result["final_output_path"]).unlink(missing_ok=True)
+        return result
+
+    def test_narration_past_the_video_end_is_reported(self, workdir):
+        # 6s video, but the last two lines start at 8s and 12s
+        result = self._run(workdir, 6, [(0.0, 1.0), (8.0, 1.0), (12.0, 1.0)])
+
+        warnings = result.get("pipeline_warnings") or []
+        assert any("fell past the end" in w for w in warnings), warnings
+        assert any("2 narration line(s)" in w for w in warnings), warnings
+
+    def test_segments_within_bounds_produce_no_warning(self, workdir):
+        result = self._run(workdir, 10, [(0.0, 1.0), (3.0, 1.0), (6.0, 1.0)])
+
+        assert not (result.get("pipeline_warnings") or [])
+        assert result["final_output_path"] is not None
+
+    def test_dense_narration_is_not_sped_up_past_the_cap(self, workdir):
+        from src.agent.nodes import _MAX_NARRATION_TEMPO
+
+        # 4s of speech crammed into a 1s window would need 4x to fit
+        result = self._run(workdir, 10, [(0.0, 4.0), (1.0, 0.5)])
+
+        warnings = result.get("pipeline_warnings") or []
+        assert any(f"{_MAX_NARRATION_TEMPO}x" in w for w in warnings), warnings
+        assert any("4.0x needed to fit" in w for w in warnings), warnings
+
+    def test_the_cap_is_only_reported_once(self, workdir):
+        result = self._run(workdir, 20, [(0.0, 4.0), (1.0, 4.0), (2.0, 4.0), (3.0, 0.5)])
+
+        warnings = [w for w in (result.get("pipeline_warnings") or []) if "speech kept at" in w]
+        assert len(warnings) == 1
+
+    def test_audio_that_fits_is_left_at_natural_speed(self, workdir):
+        result = self._run(workdir, 10, [(0.0, 1.0), (5.0, 1.0)])
+
+        assert not any("speech kept at" in w for w in (result.get("pipeline_warnings") or []))
+
+
+class TestCoordinateSystemGuidance:
+    """The blanket ban on coordinate arrays also banned ax.c2p, the only correct
+    way to place anything on a set of axes."""
+
+    def _prompt(self, monkeypatch):
+        from src.agent import nodes
+
+        captured = {}
+
+        def fake_llm(messages, temperature=0.2):
+            captured["system"] = messages[0]["content"]
+            captured["user"] = messages[1]["content"]
+            return None
+
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _EmptyRetriever())
+        monkeypatch.setattr(nodes, "llm_chat", fake_llm)
+        nodes.video_code_gen_node(_base_state())
+        return captured
+
+    def test_axes_derived_coordinates_are_required_not_banned(self, monkeypatch):
+        captured = self._prompt(monkeypatch)
+
+        assert "ax.c2p" in captured["user"]
+        assert "REQUIRED ON A GRAPH" in captured["user"]
+
+    def test_literal_coordinates_are_still_banned(self, monkeypatch):
+        captured = self._prompt(monkeypatch)
+
+        assert "move_to([2, -1, 0])" in captured["user"]
+        assert "BANNED" in captured["user"]
+
+    def test_default_system_message_carries_the_same_exception(self):
+        from src.agent.state import create_initial_state
+
+        state = create_initial_state("T", "d")
+
+        assert "ax.c2p" in state["system_message"]
+        assert "EXCEPTION" in state["system_message"]
+
+
+class TestRecorrectorHistory:
+    def _capture(self, monkeypatch, state):
+        from src.agent import nodes
+
+        captured = {}
+
+        def fake_llm(messages, temperature=0.1):
+            captured["prompt"] = messages[1]["content"]
+            return "```python\nfixed = True\n```"
+
+        monkeypatch.setattr(nodes, "llm_chat", fake_llm)
+        result = nodes.recorrector_node(state)
+        return captured["prompt"], result
+
+    def test_first_attempt_carries_no_history_block(self, monkeypatch):
+        prompt, result = self._capture(
+            monkeypatch, {"code": "x = 1", "error": "NameError: y", "error_count": 0}
+        )
+
+        assert "not the first attempt" not in prompt
+        assert result["fix_history"] == [{"attempt": 1, "error": "NameError: y"}]
+
+    def test_later_attempts_see_what_was_already_tried(self, monkeypatch):
+        prompt, result = self._capture(
+            monkeypatch,
+            {
+                "code": "x = 1",
+                "error": "TypeError: bad tip_length",
+                "error_count": 2,
+                "fix_history": [
+                    {"attempt": 1, "error": "AttributeError: no ShowCreation"},
+                    {"attempt": 2, "error": "TypeError: unexpected length="},
+                ],
+            },
+        )
+
+        assert "not the first attempt" in prompt
+        assert "Attempt 1 tried to fix:\nAttributeError: no ShowCreation" in prompt
+        assert "Attempt 2 tried to fix:\nTypeError: unexpected length=" in prompt
+        assert "Do not repeat them" in prompt
+
+    def test_history_entry_appends_rather_than_replaces(self, monkeypatch):
+        """fix_history uses an add reducer, so a node returns only its own entry."""
+        _, result = self._capture(
+            monkeypatch,
+            {
+                "code": "x = 1",
+                "error": "boom",
+                "error_count": 1,
+                "fix_history": [{"attempt": 1, "error": "earlier"}],
+            },
+        )
+
+        assert result["fix_history"] == [{"attempt": 2, "error": "boom"}]
+
+    def test_long_errors_are_truncated_in_history(self, monkeypatch):
+        _, result = self._capture(
+            monkeypatch, {"code": "x = 1", "error": "E" * 900, "error_count": 0}
+        )
+
+        assert len(result["fix_history"][0]["error"]) == 500

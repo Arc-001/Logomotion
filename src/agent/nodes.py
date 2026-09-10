@@ -34,7 +34,7 @@ except ImportError:
 from .state import VideoGenState, TranscriptSection
 from ..config import get_settings
 from ..graph_rag.schema import KNOWN_MANIM_CLASSES, KNOWN_ANIMATIONS
-from ..manim_runner.executor import ManimExecutor
+from ..manim_runner.executor import ManimExecutor, compute_render_timeout
 from ..manim_runner.validator import VideoValidator, get_video_duration
 
 
@@ -391,6 +391,142 @@ Rules:
 
 
 # ============================================================================
+# NODE 0c: Narration TTS (synthesise and MEASURE narration before code exists)
+# ============================================================================
+
+# Breathing room appended to each section on top of its spoken audio, so the
+# animation does not cut over the last syllable.
+_SECTION_PADDING = 1.0
+
+# How far the narration-driven total may drift from the requested length
+# before the user is told the video grew or shrank to fit the speech.
+_NARRATION_DRIFT_TOLERANCE = 0.15
+
+
+def _get_tts():
+    """Return the process-wide Kokoro instance, or None when unavailable.
+
+    Uses the module-level singleton so the 82M ONNX model is loaded once per
+    process instead of once per job.
+    """
+    try:
+        from ..tts import get_tts, KOKORO_AVAILABLE
+    except ImportError as e:
+        print(f"[TTS] WARNING: Could not import TTS module: {e}")
+        return None
+
+    if not KOKORO_AVAILABLE:
+        print("[TTS] WARNING: Kokoro not available (kokoro-onnx not installed)")
+        return None
+
+    try:
+        return get_tts(voice="af_bella")
+    except Exception as e:
+        print(f"[TTS] WARNING: Could not initialise Kokoro: {e}")
+        return None
+
+
+def narration_tts_node(state: VideoGenState) -> dict:
+    """
+    Record the storyboard narration first, then time the video to it.
+
+    The transcript is derived from the storyboard rather than invented by the
+    code generator, and every section's budget is the *measured* length of its
+    audio. Downstream, the code generator is handed real seconds to fill, so
+    narration and animation cannot drift apart.
+
+    Input:  storyboard
+    Output: narration_segments, transcript_sections, audio_segments,
+            storyboard (with real budgets), target_duration
+    """
+    storyboard = state.get("storyboard")
+    if not storyboard:
+        # No plan to narrate — the single-shot path handles TTS itself.
+        return {}
+
+    tts = _get_tts()
+    if tts is None:
+        return {
+            "pipeline_warnings": [
+                "Narration could not be recorded up front (TTS unavailable); "
+                "falling back to timestamps estimated by the model"
+            ],
+        }
+
+    requested_duration = state.get("target_duration") or state["scene_length"] * 60.0
+    print(f"[NARRATION] Recording {len(storyboard)} section(s) before code generation")
+
+    segments: list[dict] = []
+    sections: list[TranscriptSection] = []
+    audio_segments: list[str] = []
+    planned: list[dict] = []
+    warnings: list[str] = []
+
+    cursor = 0.0
+    for i, section in enumerate(storyboard):
+        text = str(section.get("narration", "")).strip()
+        audio_path = None
+        audio_duration = 0.0
+
+        if text:
+            result = tts.synthesize(text)
+            if result.success and result.duration:
+                audio_path = result.audio_path
+                audio_duration = float(result.duration)
+                audio_segments.append(audio_path)
+                print(f"[NARRATION]   {i + 1}. {section.get('title', '')!r}: "
+                      f"{audio_duration:.1f}s of speech")
+            else:
+                print(f"[NARRATION]   {i + 1}. synthesis failed: {result.error}")
+                warnings.append(
+                    f"Narration for section {i + 1} could not be synthesised: {result.error}"
+                )
+
+        # The section must be at least long enough to say its own line.
+        budget = max(float(section.get("duration_seconds", 0.0)), audio_duration + _SECTION_PADDING)
+
+        planned.append({**section, "duration_seconds": round(budget, 2)})
+        segments.append({
+            "index": i,
+            "text": text,
+            "audio_path": audio_path,
+            "audio_duration": round(audio_duration, 3),
+            "timestamp": round(cursor, 3),
+        })
+        if text:
+            sections.append(TranscriptSection(
+                timestamp=round(cursor, 3),
+                text=text,
+                audio_path=audio_path,
+            ))
+
+        cursor += budget
+
+    total = round(cursor, 2)
+    print(f"[NARRATION] Timeline: {total:.1f}s across {len(planned)} sections "
+          f"(requested {requested_duration:.1f}s)")
+
+    if requested_duration > 0:
+        drift = abs(total - requested_duration) / requested_duration
+        if drift > _NARRATION_DRIFT_TOLERANCE:
+            direction = "longer" if total > requested_duration else "shorter"
+            warnings.append(
+                f"Video timed to the narration: {total:.0f}s, "
+                f"{drift * 100:.0f}% {direction} than the requested {requested_duration:.0f}s"
+            )
+
+    return {
+        "storyboard": planned,
+        "narration_segments": segments,
+        "transcript_sections": sections,
+        "audio_segments": audio_segments,
+        "transcript": {seg["timestamp"]: seg["text"] for seg in segments if seg["text"]},
+        "target_duration": total,
+        "pipeline_warnings": warnings,
+    }
+
+
+# ============================================================================
 # NODE 1: Video Code Generator (with Graph RAG)
 # ============================================================================
 
@@ -401,10 +537,10 @@ def video_code_gen_node(state: VideoGenState) -> dict:
     Input: system_message, scene_title, scene_prompt_description
     Output: code, transcript, retrieved_examples, retrieved_context
     """
-    from ..graph_rag.retriever import ManimRetriever  # deferred: pulls in DB drivers
+    from ..graph_rag.retriever import get_retriever  # deferred: pulls in DB drivers
 
     warnings: list[str] = []
-    retriever = ManimRetriever()
+    retriever = get_retriever()
 
     class_hints, animation_hints = _extract_rag_hints(
         f"{state['scene_title']} {state['scene_prompt_description']}"
@@ -438,10 +574,10 @@ Used animations: {', '.join(result.used_animations)}
         example_ids = []
         retrieved_context = f"RAG retrieval failed: {e}"
         warnings.append(f"RAG retrieval failed, generating without examples: {e}")
-    finally:
-        retriever.close()
 
-    target_seconds = int(state["scene_length"] * 60)
+    # narration_tts_node rewrites target_duration to the measured speech
+    # timeline, so prefer it over the raw requested length.
+    target_seconds = int(state.get("target_duration") or state["scene_length"] * 60)
     orientation = state.get("orientation", "landscape")
     print(f"[CODE GEN] Target duration: {target_seconds} seconds, orientation: {orientation}")
 
@@ -487,22 +623,49 @@ accurate, current, and informative:
     else:
         web_section = ""
 
-    # Inject the storyboard plan when the planning stage produced one
+    # Inject the storyboard plan when the planning stage produced one. When
+    # narration_tts_node already recorded the voiceover, the section windows
+    # are measured seconds of speech, not estimates — say so, and make them
+    # a hard requirement rather than a suggestion.
     storyboard = state.get("storyboard")
+    narration_segments = state.get("narration_segments") or []
+    narration_recorded = bool(narration_segments)
+
     if storyboard:
+        spoken = {seg["index"]: seg["audio_duration"] for seg in narration_segments}
         lines = []
         cursor = 0.0
         for i, section in enumerate(storyboard):
             start = cursor
             cursor += section["duration_seconds"]
             lines.append(
-                f"{i + 1}. [{start:.0f}s–{cursor:.0f}s] {section['title']}\n"
+                f"{i + 1}. [{start:.1f}s–{cursor:.1f}s] {section['title']}\n"
                 f"   Visuals: {section['visuals']}\n"
                 f"   Narration: {section['narration']}"
+                + (f"\n   Spoken audio: {spoken[i]:.1f}s (already recorded)"
+                   if i in spoken else "")
             )
-        storyboard_section = f"""
+        section_list = chr(10).join(lines)
+
+        if narration_recorded:
+            storyboard_section = f"""
+## STORYBOARD (THE NARRATION IS ALREADY RECORDED — MATCH IT EXACTLY)
+{section_list}
+
+The voiceover for every section above has ALREADY been synthesised, and the
+listed windows are its MEASURED length. The animation is being timed to the
+audio, not the other way round:
+
+- Section {{n}}'s animations plus self.wait() calls MUST total its window to
+  within half a second. Pad with self.wait() when the visuals finish early.
+- The total run time of construct() MUST come to {target_seconds} seconds.
+- Apply the CLEAR DESK rule between sections.
+- Do NOT output a transcript — the narration exists and is not yours to change.
+"""
+        else:
+            storyboard_section = f"""
 ## STORYBOARD (IMPLEMENT EXACTLY THESE SECTIONS AND DURATIONS)
-{chr(10).join(lines)}
+{section_list}
 
 - Each section's animations plus self.wait() calls must fill its allotted time window.
 - Apply the CLEAR DESK rule between sections.
@@ -510,6 +673,38 @@ accurate, current, and informative:
 """
     else:
         storyboard_section = ""
+
+    # The narration blocks are only asked for when nothing has recorded it yet.
+    if narration_recorded:
+        transcript_requirements = ""
+        transcript_response_block = ""
+    else:
+        transcript_requirements = f"""
+### 6. TRANSCRIPT / NARRATION (CRITICAL — NO SILENCE)
+- **The narration MUST cover the ENTIRE video duration with NO silent gaps longer than 3 seconds.**
+- Detail level: {depth_config["detail_level"]}
+- Add transcript entries {depth_config["transcript_density"]} — this is the MINIMUM density
+- Every visual change, animation, or concept must have accompanying narration
+- Start narration at timestamp 0 and continue until the very end of the video
+- If a section has a self.wait(), there MUST be narration during or right before it
+- Think of this as a voiceover for a YouTube educational video — continuous speaking
+"""
+        transcript_response_block = f"""
+```python
+# TRANSCRIPT_START
+transcript = {{
+    0: "Introduction text spoken at the start...",
+    3: "Continuing the explanation without gaps...",
+    8: "Every few seconds, add more narration...",
+    12: "Keep talking through the entire video...",
+    18: "No long silences — every section needs voice...",
+    25: "Wrap up with a concluding sentence...",
+    # MUST have entries {depth_config["transcript_density"]} covering the FULL {target_seconds} seconds
+    # NO gaps longer than 3 seconds between entries
+}}
+# TRANSCRIPT_END
+```
+"""
 
     prompt = f"""Create a Manim animation based on this request:
 
@@ -531,9 +726,15 @@ accurate, current, and informative:
 
 ### 2. POSITIONING — FORBIDDEN AND REQUIRED PATTERNS
 **FORBIDDEN (NEVER USE):**
-- `move_to([2, -1, 0])` — raw coordinate arrays are BANNED.
-- `move_to(np.array([x, y, 0]))` — BANNED.
-- Any hard-coded spatial number pair used to separate or offset elements.
+- `move_to([2, -1, 0])` — literal coordinate arrays for layout are BANNED.
+- `.shift(np.array([1.5, 0, 0]))` — BANNED.
+- Any hard-coded spatial number pair guessed by eye to separate or offset elements.
+
+**REQUIRED ON A GRAPH (coordinates from the axes are NOT hard-coded):**
+- `Dot(ax.c2p(2, 4))`, `label.move_to(ax.c2p(x, y))`, `.next_to(ax.c2p(x, y), UP)`.
+- `ax.plot(lambda x: x**2)`, `ax.get_graph_label(...)`, `ax.get_area(...)`.
+- Manim computes these from the axes, so they land exactly where the maths says.
+  Do NOT try to place points on a graph with `.to_edge()` or `.next_to()` guesses.
 
 **REQUIRED (ALWAYS USE):**
 - Screen edges: `.to_edge(UP)`, `.to_edge(DOWN)`, `.to_edge(LEFT)`, `.to_edge(RIGHT)`.
@@ -593,16 +794,7 @@ Use ONLY these correct APIs. DO NOT use deprecated syntax:
 - Positioning: `.move_to(point)`, `.next_to(obj, direction, buff=0.3)`
 - VGroup: `VGroup(obj1, obj2).arrange(DOWN, buff=0.3)`
 - Avoid: `ShowCreation` (use `Create`), `FadeInFromDown` (use `FadeIn` with shift)
-
-### 6. TRANSCRIPT / NARRATION (CRITICAL — NO SILENCE)
-- **The narration MUST cover the ENTIRE video duration with NO silent gaps longer than 3 seconds.**
-- Detail level: {depth_config["detail_level"]}
-- Add transcript entries {depth_config["transcript_density"]} — this is the MINIMUM density
-- Every visual change, animation, or concept must have accompanying narration
-- Start narration at timestamp 0 and continue until the very end of the video
-- If a section has a self.wait(), there MUST be narration during or right before it
-- Think of this as a voiceover for a YouTube educational video — continuous speaking
-
+{transcript_requirements}
 Here are some reference examples:
 
 {retrieved_context}
@@ -620,22 +812,7 @@ class YourSceneName(Scene):
         pass
 # CODE_END
 ```
-
-```python
-# TRANSCRIPT_START
-transcript = {{
-    0: "Introduction text spoken at the start...",
-    3: "Continuing the explanation without gaps...",
-    8: "Every few seconds, add more narration...",
-    12: "Keep talking through the entire video...",
-    18: "No long silences — every section needs voice...",
-    25: "Wrap up with a concluding sentence...",
-    # MUST have entries {depth_config["transcript_density"]} covering the FULL {target_seconds} seconds
-    # NO gaps longer than 3 seconds between entries
-}}
-# TRANSCRIPT_END
-```
-"""
+{transcript_response_block}"""
 
     messages = [
         {"role": "system", "content": state["system_message"]},
@@ -648,18 +825,19 @@ transcript = {{
         code = _extract_code_block(response_text)
 
         transcript = {}
-        transcript_match = re.search(
-            r'# TRANSCRIPT_START\n.*?transcript\s*=\s*(\{.*?\})\s*# TRANSCRIPT_END',
-            response_text,
-            re.DOTALL,
-        )
-        if transcript_match:
-            try:
-                transcript = ast.literal_eval(transcript_match.group(1))
-            except (SyntaxError, ValueError, NameError) as e:
-                warnings.append(f"Transcript could not be parsed, video will have no narration: {e}")
-        else:
-            warnings.append("LLM response contained no transcript block, video will have no narration")
+        if not narration_recorded:
+            transcript_match = re.search(
+                r'# TRANSCRIPT_START\n.*?transcript\s*=\s*(\{.*?\})\s*# TRANSCRIPT_END',
+                response_text,
+                re.DOTALL,
+            )
+            if transcript_match:
+                try:
+                    transcript = ast.literal_eval(transcript_match.group(1))
+                except (SyntaxError, ValueError, NameError) as e:
+                    warnings.append(f"Transcript could not be parsed, video will have no narration: {e}")
+            else:
+                warnings.append("LLM response contained no transcript block, video will have no narration")
 
         scene_match = re.search(r'class\s+(\w+)\s*\([^)]*Scene[^)]*\)', code)
         scene_class_name = scene_match.group(1) if scene_match else "GeneratedScene"
@@ -673,19 +851,24 @@ class GeneratedScene(Scene):
         self.play(Write(title))
         self.wait(2)
 '''
-        transcript = {0: f"Welcome to {state['scene_title']}"}
+        transcript = {} if narration_recorded else {0: f"Welcome to {state['scene_title']}"}
         scene_class_name = "GeneratedScene"
         warnings.append("LLM was unavailable, generated a placeholder title scene instead")
 
-    return {
+    result = {
         "code": code,
         "scene_class_name": scene_class_name,
-        "transcript": transcript,
         "retrieved_examples": example_ids,
         "retrieved_context": retrieved_context,
         "pipeline_warnings": warnings,
         "messages": [{"role": "assistant", "content": f"Generated code for {state['scene_title']}"}],
     }
+
+    # Recorded narration owns the transcript; do not overwrite it with an empty one.
+    if not narration_recorded:
+        result["transcript"] = transcript
+
+    return result
 
 
 # ============================================================================
@@ -707,10 +890,15 @@ def code_executor_node(state: VideoGenState) -> dict:
     print(f"[EXECUTOR] Starting Manim render for scene: {scene_class}")
 
     settings = get_settings()
+    quality = state.get("render_quality") or settings.render_quality
+    target_seconds = state.get("target_duration") or state.get("scene_length", 1.0) * 60
+    timeout = compute_render_timeout(target_seconds, quality, settings.render_timeout)
+    print(f"[EXECUTOR] Quality {quality}, {target_seconds:.0f}s target, {timeout}s timeout")
+
     executor = ManimExecutor(
-        quality=state.get("render_quality") or settings.render_quality,
+        quality=quality,
         fps=state.get("render_fps"),
-        timeout=settings.render_timeout,
+        timeout=timeout,
     )
     result = executor.execute(
         code=state["code"],
@@ -731,12 +919,16 @@ def code_executor_node(state: VideoGenState) -> dict:
         }
 
     print(f"[EXECUTOR] Render FAILED: {(result.error or '')[:200]}...")
+
+    # A failed attempt leaves a media dir behind that nothing will read again.
+    # Dropping it now keeps peak disk to one render instead of one per retry.
+    executor.cleanup(result)
+
     return {
         "error": result.error,
         "error_count": 1,
         "render_logs": f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}",
         "temp_code_path": result.code_path,
-        "temp_dirs": exec_temp_dirs,
     }
 
 
@@ -754,6 +946,26 @@ def recorrector_node(state: VideoGenState) -> dict:
     error_count = state.get("error_count", 0)
     print(f"[RECORRECTOR] Attempt {error_count + 1} to fix error")
     print(f"[RECORRECTOR] Error: {state.get('error', 'unknown')[:200]}...")
+
+    # Without the earlier rounds the corrector sees each failure as the first
+    # one and can keep re-applying a fix that has already been shown not to
+    # work. Show it what it already tried.
+    history = state.get("fix_history") or []
+    if history:
+        previous = "\n".join(
+            f"Attempt {entry['attempt']} tried to fix:\n{entry['error']}"
+            for entry in history
+        )
+        history_block = f"""
+This is not the first attempt. Earlier rounds on this same code:
+
+{previous}
+
+Those fixes did not resolve the problem below. Do not repeat them — if an
+earlier approach was wrong, take a different one.
+"""
+    else:
+        history_block = ""
 
     messages = [
         {"role": "system", "content": """You are an expert at debugging Manim code for Manim v0.18+.
@@ -781,7 +993,7 @@ Error message:
 ```
 {state["error"][:2000]}
 ```
-
+{history_block}
 Please fix the code and return the complete corrected version.
 Only return the Python code, nothing else.
 """}
@@ -797,6 +1009,10 @@ Only return the Python code, nothing else.
     return {
         "code": fixed_code.strip(),
         "error": None,
+        "fix_history": [{
+            "attempt": error_count + 1,
+            "error": str(state.get("error", ""))[:500],
+        }],
         "messages": [{"role": "assistant", "content": "Fixed code based on error feedback"}],
     }
 
@@ -811,9 +1027,16 @@ def transcript_processor_node(state: VideoGenState) -> dict:
 
     Uses Kokoro 82M local model for high-quality speech synthesis.
 
+    No-op when ``narration_tts_node`` already recorded the narration from the
+    storyboard: that path owns the timeline and this one would duplicate it.
+
     Input: transcript dict
     Output: transcript_sections list, audio_segments list
     """
+    if state.get("narration_segments"):
+        print("[TTS] Narration already recorded from the storyboard, skipping")
+        return {}
+
     sections = []
     audio_segments = []
     transcript = state.get("transcript", {})
@@ -822,16 +1045,7 @@ def transcript_processor_node(state: VideoGenState) -> dict:
 
     print(f"[TTS] Processing {len(sorted_items)} transcript segments...")
 
-    tts = None
-    try:
-        from ..tts import KokoroTTS, KOKORO_AVAILABLE
-        if KOKORO_AVAILABLE:
-            tts = KokoroTTS(voice="af_bella")
-            print("[TTS] Kokoro TTS initialized successfully")
-        else:
-            print("[TTS] WARNING: Kokoro not available (kokoro-onnx not installed)")
-    except ImportError as e:
-        print(f"[TTS] WARNING: Could not import TTS module: {e}")
+    tts = _get_tts()
 
     for i, (timestamp, text) in enumerate(sorted_items):
         audio_path = None
@@ -1250,58 +1464,99 @@ def video_duration_fixer_node(state: VideoGenState) -> dict:
 # NODE 6: Synchronizer
 # ============================================================================
 
+# Timestamps further than this from the rendered timeline are worth telling
+# the user about; beyond _MAX_SYNC_SCALE something is wrong and we leave the
+# timeline alone rather than smearing narration across the whole video.
+_SYNC_DRIFT_TOLERANCE = 0.15
+_MAX_SYNC_SCALE = 4.0
+
+
 def synchronizer_node(state: VideoGenState) -> dict:
     """
-    Synchronize video with transcript timestamps.
+    Map transcript timestamps onto the timeline the video actually has.
 
-    If the video duration was adjusted, scales all transcript timestamps
-    proportionally so audio cues stay aligned with the visual content.
+    Timestamps are authored against ``target_duration`` — the storyboard's
+    narration timeline, or the requested length on the single-shot path. The
+    render almost never lands exactly there, so every timestamp is rescaled by
+    ``actual_duration / target_duration``.
 
-    ``duration_factor`` is the actual speed ratio (adjusted_dur / original_dur)
-    returned by ``video_duration_fixer_node``.  A value of 2.0 means the video
-    is now twice as long, so every timestamp must be multiplied by 2.0.
+    This runs on every path. Previously it only fired when
+    ``video_duration_fixer_node`` had stretched the video, which in the default
+    ``guide`` mode never happens — so a video that came out 90s against a 60s
+    plan kept 60s-scale timestamps and the narration finished a third of the
+    way early.
 
-    Input: checked_video_path, transcript_sections, audio_segments, duration_factor
-    Output: synced_video_path, transcript_sections (adjusted), audio_segments
+    Input: checked_video_path, transcript_sections, audio_segments,
+           actual_duration, target_duration
+    Output: synced_video_path, transcript_sections (rescaled), audio_segments
     """
     video_path = state.get("checked_video_path")
     audio_segments = state.get("audio_segments", [])
     transcript_sections = state.get("transcript_sections", [])
-    duration_adjusted = state.get("duration_adjusted", False)
-    speed_ratio = state.get("duration_factor")  # adjusted_dur / original_dur
+    actual_duration = state.get("actual_duration")
+    target_duration = state.get("target_duration") or state.get("scene_length", 1.0) * 60.0
 
     print(f"[SYNC] Video path: {video_path}")
     print(f"[SYNC] Audio segments: {len(audio_segments)}")
     print(f"[SYNC] Transcript sections: {len(transcript_sections)}")
-    print(f"[SYNC] Duration adjusted: {duration_adjusted} (speed_ratio: {speed_ratio})")
 
-    synced_sections = list(transcript_sections)
+    warnings: list[str] = []
+    scale = 1.0
 
-    if duration_adjusted and speed_ratio and speed_ratio != 1.0:
-        # Multiply timestamps by speed_ratio:
-        #   video slowed 2x → speed_ratio=2.0 → timestamps double
-        #   video sped up 2x → speed_ratio=0.5 → timestamps halve
-        print(f"[SYNC] Scaling transcript timestamps × {speed_ratio:.4f}")
+    if not transcript_sections:
+        return {
+            "synced_video_path": video_path,
+            "audio_segments": audio_segments,
+            "transcript_sections": transcript_sections,
+        }
+
+    if not actual_duration or target_duration <= 0:
+        print("[SYNC] Duration unknown — leaving transcript timestamps as authored")
+    else:
+        scale = actual_duration / target_duration
+        drift = abs(scale - 1.0)
+
+        if scale <= 0 or scale > _MAX_SYNC_SCALE or scale < 1.0 / _MAX_SYNC_SCALE:
+            warnings.append(
+                f"Rendered video is {actual_duration:.0f}s against a {target_duration:.0f}s "
+                f"plan; narration timing left unscaled because the gap is implausible"
+            )
+            print(f"[SYNC] Implausible scale {scale:.2f}x — leaving timestamps alone")
+            scale = 1.0
+        elif drift > _SYNC_DRIFT_TOLERANCE:
+            direction = "longer" if scale > 1.0 else "shorter"
+            warnings.append(
+                f"Rendered video is {drift * 100:.0f}% {direction} than planned "
+                f"({actual_duration:.0f}s vs {target_duration:.0f}s); narration "
+                f"timestamps rescaled by {scale:.2f}x to match"
+            )
+
+    synced_sections = transcript_sections
+    if scale != 1.0:
+        print(f"[SYNC] Scaling transcript timestamps x {scale:.4f}")
         synced_sections = [
             TranscriptSection(
-                timestamp=section["timestamp"] * speed_ratio,
+                timestamp=section["timestamp"] * scale,
                 text=section["text"],
                 audio_path=section.get("audio_path"),
             )
             for section in transcript_sections
         ]
-        print(f"[SYNC] Adjusted {len(synced_sections)} transcript timestamps")
 
     return {
         "synced_video_path": video_path,
         "audio_segments": audio_segments,
         "transcript_sections": synced_sections,
+        "pipeline_warnings": warnings,
     }
 
 
 # ============================================================================
 # NODE 7: Audio Video Merger (with ffmpeg)
 # ============================================================================
+
+# Speech faster than this stops being listenable, whatever the window says.
+_MAX_NARRATION_TEMPO = 1.25
 
 _TEMP_PREFIXES = ("manim_exec_", "manim_durfix_", "manim_merge_", "manim_frames_", "kokoro_")
 
@@ -1331,7 +1586,12 @@ def _cleanup_temp_artifacts(state: VideoGenState, extra_dirs: Optional[list] = N
             path.unlink(missing_ok=True)
 
 
-def _finish_merge(state: VideoGenState, video_path: Optional[str], merge_dir: Optional[str] = None) -> dict:
+def _finish_merge(
+    state: VideoGenState,
+    video_path: Optional[str],
+    merge_dir: Optional[str] = None,
+    warnings: Optional[list] = None,
+) -> dict:
     """Persist the final video into the project output dir, then clean up temp artifacts.
 
     Temp dirs are only removed once the video has been copied out of them
@@ -1356,7 +1616,10 @@ def _finish_merge(state: VideoGenState, video_path: Optional[str], merge_dir: Op
     if persisted or final_path is None:
         _cleanup_temp_artifacts(state, [merge_dir] if merge_dir else None)
 
-    return {"final_output_path": final_path}
+    result = {"final_output_path": final_path}
+    if warnings:
+        result["pipeline_warnings"] = list(warnings)
+    return result
 
 
 def audio_video_merger_node(state: VideoGenState) -> dict:
@@ -1378,16 +1641,19 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
     print(f"[AUDIO MERGE] Audio segments: {len(audio_segments)}")
     print(f"[AUDIO MERGE] Transcript sections: {len(transcript_sections)}")
 
+    merge_warnings: list[str] = []
+    capped_any = False
+
     if not video_path:
         print("[AUDIO MERGE] No video path provided")
-        return _finish_merge(state, None)
+        return _finish_merge(state, None, warnings=merge_warnings)
 
     valid_audio_segments = [p for p in audio_segments if p and Path(p).exists()]
     print(f"[AUDIO MERGE] Valid audio files: {len(valid_audio_segments)}")
 
     if not valid_audio_segments:
         print("[AUDIO MERGE] No valid audio segments, returning video only")
-        return _finish_merge(state, video_path)
+        return _finish_merge(state, video_path, warnings=merge_warnings)
 
     temp_dir = tempfile.mkdtemp(prefix="manim_merge_")
 
@@ -1419,10 +1685,14 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
             dropped = before - len(sections_with_audio)
             if dropped > 0:
                 print(f"[AUDIO MERGE] Dropped {dropped} segment(s) past video end ({video_duration:.1f}s)")
+                merge_warnings.append(
+                    f"{dropped} narration line(s) fell past the end of the "
+                    f"{video_duration:.0f}s video and were dropped"
+                )
 
         if not sections_with_audio:
             print("[AUDIO MERGE] No audio segments within video bounds")
-            return _finish_merge(state, video_path, temp_dir)
+            return _finish_merge(state, video_path, temp_dir, merge_warnings)
 
         # Sort by timestamp
         sections_with_audio.sort(key=lambda s: s["timestamp"])
@@ -1471,10 +1741,21 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
                 print(f"[AUDIO MERGE]   Segment {i} ({ts:.1f}s): could not measure duration, skipping")
                 continue
 
-            # 3. If audio overflows the window, speed it up
+            # 3. If audio overflows the window, speed it up — but only as far
+            # as speech stays listenable. Squeezing a line into an undersized
+            # window at 3-5x produced intelligible-on-paper, chipmunk-in-practice
+            # narration; past the cap the clip is allowed to run long instead,
+            # and the cursor resync below absorbs the overrun.
             processed_path = norm_path
             if clip_dur > window + 0.1:
-                speed_factor = clip_dur / window
+                needed = clip_dur / window
+                speed_factor = min(needed, _MAX_NARRATION_TEMPO)
+                if needed > _MAX_NARRATION_TEMPO and not capped_any:
+                    capped_any = True
+                    merge_warnings.append(
+                        f"Narration is denser than the animation allows; speech kept at "
+                        f"{_MAX_NARRATION_TEMPO}x rather than the {needed:.1f}x needed to fit"
+                    )
                 # atempo only supports 0.5 to 2.0 per stage; chain for extreme values
                 processed_path = Path(temp_dir) / f"fast_{i:03d}.wav"
                 atempo_filters = _build_atempo_chain(speed_factor)
@@ -1512,11 +1793,21 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
                     concat_pieces.append(str(silence_path))
 
             concat_pieces.append(str(processed_path))
+
+            # An overrunning clip must not push every later segment later for
+            # the rest of the track: resync to the next segment's start when it
+            # has already passed, so drift cannot accumulate.
             cursor = ts + clip_dur
+            if i + 1 < len(sections_with_audio):
+                next_ts = sections_with_audio[i + 1]["timestamp"]
+                if cursor > next_ts:
+                    print(f"[AUDIO MERGE]   Segment {i} overran its window by "
+                          f"{cursor - next_ts:.2f}s; resyncing to {next_ts:.1f}s")
+                    cursor = next_ts
 
         if not concat_pieces:
             print("[AUDIO MERGE] No audio pieces produced")
-            return _finish_merge(state, video_path, temp_dir)
+            return _finish_merge(state, video_path, temp_dir, merge_warnings)
 
         # 5. Concatenate all pieces into one audio file
         merged_audio = Path(temp_dir) / "merged_audio.wav"
@@ -1540,7 +1831,7 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
             result = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=60)
             if result.returncode != 0 or not merged_audio.exists():
                 print(f"[AUDIO MERGE] Concat failed: {result.stderr[:200]}")
-                return _finish_merge(state, video_path, temp_dir)
+                return _finish_merge(state, video_path, temp_dir, merge_warnings)
 
         # Log merged audio duration
         audio_dur = get_video_duration(str(merged_audio), timeout=10)
@@ -1600,16 +1891,16 @@ def audio_video_merger_node(state: VideoGenState) -> dict:
 
         if not final_output.exists():
             print("[AUDIO MERGE] Final output not created")
-            return _finish_merge(state, video_path, temp_dir)
+            return _finish_merge(state, video_path, temp_dir, merge_warnings)
 
         print(f"[AUDIO MERGE] Merge success: {final_output}")
-        return _finish_merge(state, str(final_output), temp_dir)
+        return _finish_merge(state, str(final_output), temp_dir, merge_warnings)
 
     except Exception as e:
         print(f"[AUDIO MERGE] Error: {e}")
         import traceback
         traceback.print_exc()
-        return _finish_merge(state, video_path, temp_dir)
+        return _finish_merge(state, video_path, temp_dir, merge_warnings)
 
 
 def _build_atempo_chain(factor: float) -> str:

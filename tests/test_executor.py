@@ -11,7 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from src.manim_runner.executor import ManimExecutor, ExecutionResult
+from src.manim_runner.executor import (
+    ManimExecutor,
+    ExecutionResult,
+    compute_render_timeout,
+)
 
 
 # ============================================================================
@@ -98,6 +102,36 @@ class TestFindVideo:
         result = executor._find_video(missing, "MyScene")
 
         assert result is None
+
+    def test_partial_movie_files_are_never_chosen(self, tmp_path):
+        """Manim writes every animation as its own clip before stitching them;
+        returning one of those yields a fragment instead of the video."""
+        executor = ManimExecutor()
+        nested = tmp_path / "videos" / "scene" / "1080p30"
+        partials = nested / "partial_movie_files" / "MyScene"
+        partials.mkdir(parents=True)
+        (partials / "MyScene_0000.mp4").write_bytes(b"x")
+        target = nested / "MyScene.mp4"
+        target.write_bytes(b"x")
+
+        assert executor._find_video(tmp_path, "MyScene") == str(target)
+
+    def test_only_partial_movie_files_means_no_video(self, tmp_path):
+        executor = ManimExecutor()
+        partials = tmp_path / "videos" / "partial_movie_files" / "MyScene"
+        partials.mkdir(parents=True)
+        (partials / "MyScene_0000.mp4").write_bytes(b"x")
+
+        assert executor._find_video(tmp_path, "MyScene") is None
+
+    def test_falls_back_to_any_stitched_video(self, tmp_path):
+        executor = ManimExecutor()
+        nested = tmp_path / "videos" / "1080p30"
+        nested.mkdir(parents=True)
+        other = nested / "SomethingElse.mp4"
+        other.write_bytes(b"x")
+
+        assert executor._find_video(tmp_path, "MyScene") == str(other)
 
 
 # ============================================================================
@@ -251,3 +285,98 @@ class TestValidateManimCode:
         assert result.success is False
         assert "SyntaxError" in result.error
         assert result.code_path == ""
+
+
+class TestComputeRenderTimeout:
+    """A fixed 120s ceiling could not cover the 30-minute videos the API accepts."""
+
+    def test_short_clips_keep_the_configured_floor(self):
+        assert compute_render_timeout(30, "m", 120) == 120
+
+    def test_long_targets_scale_past_the_floor(self):
+        # 5 minutes at 720p: 300s of video, 2s of rendering per second
+        assert compute_render_timeout(300, "m", 120) == 600
+
+    def test_higher_quality_costs_more_time(self):
+        assert compute_render_timeout(300, "h", 120) > compute_render_timeout(300, "m", 120)
+        assert compute_render_timeout(300, "m", 120) > compute_render_timeout(300, "l", 120)
+
+    def test_unknown_quality_falls_back_to_the_medium_factor(self):
+        assert compute_render_timeout(300, "z", 120) == compute_render_timeout(300, "m", 120)
+
+    @pytest.mark.parametrize("target", [0, None, -5])
+    def test_missing_target_keeps_the_floor(self, target):
+        assert compute_render_timeout(target, "m", 120) == 120
+
+
+class TestValidatorReadsTheAst:
+    """Pattern matching on raw source failed code that only mentioned an API."""
+
+    def _code(self, body):
+        return f"from manim import *\n\nclass MyScene(Scene):\n    def construct(self):\n{body}\n"
+
+    def test_removed_api_in_a_comment_is_not_an_error(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = self._code("        # do not use ShowCreation(...) here\n        pass")
+
+        assert validate_manim_code(code, "MyScene") is None
+
+    def test_removed_api_in_a_docstring_is_not_an_error(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = self._code('        """Prefer Create over Code(...) and TextMobject(...)."""\n        pass')
+
+        assert validate_manim_code(code, "MyScene") is None
+
+    def test_removed_api_actually_called_is_still_an_error(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = self._code("        self.play(ShowCreation(Circle()))")
+
+        assert "ShowCreation" in validate_manim_code(code, "MyScene")
+
+    def test_scene_name_inside_a_string_does_not_satisfy_the_class_check(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = 'from manim import *\n\nname = "class MyScene(Scene)"\n'
+
+        assert "not defined" in validate_manim_code(code, "MyScene")
+
+    def test_manim_mentioned_in_a_string_does_not_satisfy_the_import_check(self):
+        from src.manim_runner.validator import validate_manim_code
+
+        code = 'note = "from manim import *"\n\nclass MyScene:\n    pass\n'
+
+        assert "Missing manim import" in validate_manim_code(code, "MyScene")
+
+
+class TestFailedRenderIsCleanedUpImmediately:
+    def test_executor_cleanup_is_called_and_no_temp_dir_is_registered(self, monkeypatch):
+        from src.agent import nodes
+
+        cleaned = []
+
+        class _FailingExecutor:
+            def __init__(self, **kwargs):
+                pass
+
+            def execute(self, code, scene_class_name, orientation="landscape"):
+                return ExecutionResult(
+                    success=False, video_path=None, error="boom",
+                    stdout="", stderr="", code_path="/tmp/manim_exec_x/scene.py",
+                    output_dir="/tmp/manim_exec_x/media",
+                )
+
+            def cleanup(self, result):
+                cleaned.append(result.code_path)
+
+        monkeypatch.setattr(nodes, "ManimExecutor", _FailingExecutor)
+        state = {"code": "x", "scene_class_name": "MyScene", "render_quality": "m",
+                 "scene_length": 1.0, "target_duration": 60.0}
+
+        result = nodes.code_executor_node(state)
+
+        assert cleaned == ["/tmp/manim_exec_x/scene.py"]
+        assert "temp_dirs" not in result
+        assert result["error"] == "boom"

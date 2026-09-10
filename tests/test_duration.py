@@ -220,93 +220,81 @@ class TestDurationFixer:
 
 
 class TestSynchronizerTimestampScaling:
-    """Tests for transcript timestamp adjustment in synchronizer_node."""
+    """Timestamps are mapped onto the timeline the render actually has."""
 
-    def test_scales_timestamps_on_slowdown(self):
-        """When video is slowed 2x (duration_factor=2.0), timestamps should double."""
-        sections = [
-            {"timestamp": 0.0, "text": "Intro", "audio_path": None},
-            {"timestamp": 5.0, "text": "Middle", "audio_path": None},
-            {"timestamp": 10.0, "text": "End", "audio_path": None},
-        ]
+    SECTIONS = [
+        {"timestamp": 0.0, "text": "Intro", "audio_path": None},
+        {"timestamp": 5.0, "text": "Middle", "audio_path": None},
+        {"timestamp": 10.0, "text": "End", "audio_path": None},
+    ]
 
-        result = synchronizer_node(
+    def _run(self, actual, target, sections=None):
+        return synchronizer_node(
             {
                 "checked_video_path": "/some/video.mp4",
-                "transcript_sections": sections,
+                "transcript_sections": [dict(s) for s in self.SECTIONS] if sections is None else sections,
                 "audio_segments": [],
-                "duration_adjusted": True,
-                "duration_factor": 2.0,
+                "actual_duration": actual,
+                "target_duration": target,
             }
         )
 
+    def test_stretches_timestamps_when_the_render_ran_long(self):
+        result = self._run(actual=40.0, target=20.0)
+
         adjusted = result["transcript_sections"]
-        assert adjusted[0]["timestamp"] == 0.0
-        assert adjusted[1]["timestamp"] == 10.0
-        assert adjusted[2]["timestamp"] == 20.0
+        assert [s["timestamp"] for s in adjusted] == [0.0, 10.0, 20.0]
         assert result["synced_video_path"] == "/some/video.mp4"
 
-    def test_scales_timestamps_on_speedup(self):
-        """When video is sped up 2x (duration_factor=0.5), timestamps should halve."""
-        sections = [
-            {"timestamp": 0.0, "text": "Intro", "audio_path": None},
-            {"timestamp": 10.0, "text": "Middle", "audio_path": None},
-            {"timestamp": 20.0, "text": "End", "audio_path": None},
-        ]
+    def test_compresses_timestamps_when_the_render_ran_short(self):
+        result = self._run(actual=10.0, target=20.0)
 
+        assert [s["timestamp"] for s in result["transcript_sections"]] == [0.0, 2.5, 5.0]
+
+    def test_guide_mode_drift_is_corrected_and_warned(self):
+        """The default path: no ffmpeg duration fix ever runs, so this is the only
+        thing keeping narration aligned with a video that missed its target."""
+        result = self._run(actual=90.0, target=60.0)
+
+        assert [s["timestamp"] for s in result["transcript_sections"]] == [0.0, 7.5, 15.0]
+        assert any("rescaled" in w for w in result["pipeline_warnings"])
+
+    def test_small_drift_is_scaled_without_a_warning(self):
+        result = self._run(actual=21.0, target=20.0)
+
+        assert result["transcript_sections"][1]["timestamp"] == pytest.approx(5.25)
+        assert not result.get("pipeline_warnings")
+
+    def test_matching_duration_leaves_timestamps_untouched(self):
+        sections = [dict(s) for s in self.SECTIONS]
         result = synchronizer_node(
             {
                 "checked_video_path": "/some/video.mp4",
                 "transcript_sections": sections,
                 "audio_segments": [],
-                "duration_adjusted": True,
-                "duration_factor": 0.5,
+                "actual_duration": 20.0,
+                "target_duration": 20.0,
             }
         )
 
-        adjusted = result["transcript_sections"]
-        assert adjusted[0]["timestamp"] == 0.0
-        assert adjusted[1]["timestamp"] == 5.0
-        assert adjusted[2]["timestamp"] == 10.0
+        assert result["transcript_sections"] == sections
 
-    def test_no_scaling_when_not_adjusted(self):
-        """Timestamps should remain unchanged when no duration adjustment was made."""
-        sections = [
-            {"timestamp": 0.0, "text": "Intro", "audio_path": None},
-            {"timestamp": 5.0, "text": "End", "audio_path": None},
-        ]
+    def test_unknown_duration_leaves_timestamps_untouched(self):
+        result = self._run(actual=None, target=20.0)
 
-        result = synchronizer_node(
-            {
-                "checked_video_path": "/some/video.mp4",
-                "transcript_sections": sections,
-                "audio_segments": [],
-                "duration_adjusted": False,
-                "duration_factor": None,
-            }
-        )
+        assert [s["timestamp"] for s in result["transcript_sections"]] == [0.0, 5.0, 10.0]
 
-        adjusted = result["transcript_sections"]
-        assert adjusted[0]["timestamp"] == 0.0
-        assert adjusted[1]["timestamp"] == 5.0
-        # Unadjusted case returns the original list objects
-        assert adjusted == sections
+    def test_implausible_gap_is_refused_and_warned(self):
+        result = self._run(actual=600.0, target=20.0)
 
-    def test_no_scaling_when_factor_is_one(self):
-        """A duration_factor of exactly 1.0 should not rescale timestamps."""
-        sections = [{"timestamp": 4.0, "text": "x", "audio_path": None}]
+        assert [s["timestamp"] for s in result["transcript_sections"]] == [0.0, 5.0, 10.0]
+        assert any("implausible" in w for w in result["pipeline_warnings"])
 
-        result = synchronizer_node(
-            {
-                "checked_video_path": "/some/video.mp4",
-                "transcript_sections": sections,
-                "audio_segments": [],
-                "duration_adjusted": True,
-                "duration_factor": 1.0,
-            }
-        )
+    def test_empty_transcript_is_a_passthrough(self):
+        result = self._run(actual=90.0, target=20.0, sections=[])
 
-        assert result["transcript_sections"][0]["timestamp"] == 4.0
+        assert result["transcript_sections"] == []
+        assert not result.get("pipeline_warnings")
 
 
 class TestShouldFixDuration:

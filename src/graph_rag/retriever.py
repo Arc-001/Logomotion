@@ -5,10 +5,33 @@ Combines vector similarity search with graph traversal
 to find the most relevant Manim code examples.
 """
 
+import re
+import threading
 from typing import Optional
 from dataclasses import dataclass
 
+from .curation import example_rejection_reason
 from .db import GraphRAGClients
+
+
+# Reciprocal rank fusion constant. 60 is the value from the original paper
+# and damps the difference between the top few ranks.
+_RRF_K = 60
+
+# Tokens too generic to identify a concept.
+_STOPWORDS = {
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",
+    "how", "what", "why", "show", "explain", "create", "make", "animate",
+    "animation", "video", "scene", "using", "about", "that", "this", "is",
+}
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase content words of at least three characters."""
+    return [
+        token for token in re.findall(r"[a-z0-9]+", text.lower())
+        if len(token) >= 3 and token not in _STOPWORDS
+    ]
 
 
 @dataclass
@@ -73,15 +96,27 @@ class ManimRetriever(GraphRAGClients):
             """, animation_names=animation_names, limit=limit)
             return [record["id"] for record in result]
 
-    def search_by_concept(self, concept: str, limit: int = 5) -> list[str]:
-        """Find examples that demonstrate a concept."""
+    def search_by_concept(self, query: str, limit: int = 5) -> list[str]:
+        """Find examples demonstrating any concept mentioned in the query.
+
+        Concept names are single keywords ("derivative", "vector field"), so
+        matching them against the whole query sentence found nothing: a
+        sentence never CONTAINS a keyword. Match the query's tokens instead,
+        and rank by how many concepts an example covers.
+        """
+        tokens = _tokenize(query)
+        if not tokens:
+            return []
+
         with self.neo4j_driver.session() as session:
             result = session.run("""
                 MATCH (e:Example)-[:DEMONSTRATES]->(c:Concept)
-                WHERE toLower(c.name) CONTAINS toLower($concept)
+                WHERE ANY(token IN $tokens WHERE toLower(c.name) CONTAINS token)
+                WITH e, COUNT(DISTINCT c) AS match_count
+                ORDER BY match_count DESC
                 LIMIT $limit
                 RETURN e.id as id
-            """, concept=concept, limit=limit)
+            """, tokens=tokens, limit=limit)
             return [record["id"] for record in result]
 
     def get_related_examples(self, example_id: str, limit: int = 3) -> list[str]:
@@ -138,6 +173,15 @@ class ManimRetriever(GraphRAGClients):
         """
         Hybrid search combining vector similarity and graph traversal.
 
+        The four sources produce rankings that are not comparable to each
+        other, so they are fused with reciprocal rank fusion rather than by
+        scaling raw positions — which previously made a source's contribution
+        depend on how many results it happened to return.
+
+        Results that would not survive corpus curation are skipped, so an
+        example indexed before the curation rules existed still cannot reach
+        the generation prompt.
+
         Args:
             query: Natural language query
             class_hints: Optional list of Manim classes to prioritize
@@ -148,40 +192,38 @@ class ManimRetriever(GraphRAGClients):
         Returns:
             List of retrieval results sorted by relevance
         """
+        graph_weight = 1 - vector_weight
         candidates: dict[str, float] = {}
 
-        vector_ids = self.search_by_vector(query, limit=limit * 2)
-        for i, id_ in enumerate(vector_ids):
-            score = (1 - i / len(vector_ids)) * vector_weight
-            candidates[id_] = candidates.get(id_, 0) + score
+        def fuse(ids: list[str], weight: float) -> None:
+            for rank, id_ in enumerate(ids):
+                candidates[id_] = candidates.get(id_, 0.0) + weight / (_RRF_K + rank)
 
-        graph_weight = 1 - vector_weight
+        fuse(self.search_by_vector(query, limit=limit * 2), vector_weight)
 
         if class_hints:
-            class_ids = self.search_by_classes(class_hints, limit=limit)
-            for i, id_ in enumerate(class_ids):
-                score = (1 - i / max(len(class_ids), 1)) * graph_weight * 0.5
-                candidates[id_] = candidates.get(id_, 0) + score
+            fuse(self.search_by_classes(class_hints, limit=limit), graph_weight * 0.5)
 
         if animation_hints:
-            anim_ids = self.search_by_animations(animation_hints, limit=limit)
-            for i, id_ in enumerate(anim_ids):
-                score = (1 - i / max(len(anim_ids), 1)) * graph_weight * 0.5
-                candidates[id_] = candidates.get(id_, 0) + score
+            fuse(self.search_by_animations(animation_hints, limit=limit), graph_weight * 0.5)
 
-        concept_ids = self.search_by_concept(query, limit=limit)
-        for i, id_ in enumerate(concept_ids):
-            score = (1 - i / max(len(concept_ids), 1)) * graph_weight * 0.3
-            candidates[id_] = candidates.get(id_, 0) + score
+        fuse(self.search_by_concept(query, limit=limit), graph_weight * 0.3)
 
-        sorted_ids = sorted(candidates.items(), key=lambda x: x[1], reverse=True)[:limit]
+        ranked = sorted(candidates.items(), key=lambda item: item[1], reverse=True)
 
         results = []
-        for id_, score in sorted_ids:
+        for id_, score in ranked:
+            if len(results) >= limit:
+                break
             details = self.get_example_details(id_)
-            if details:
-                details.score = score
-                results.append(details)
+            if not details:
+                continue
+            reason = example_rejection_reason(details.code)
+            if reason:
+                print(f"[RAG] Skipping example {id_}: {reason}")
+                continue
+            details.score = score
+            results.append(details)
 
         return results
 
@@ -229,3 +271,30 @@ class ManimRetriever(GraphRAGClients):
                 "description": record["description"],
                 "example_count": record["example_count"],
             }
+
+
+# One retriever per process. Opening a Neo4j driver and a ChromaDB client per
+# request (or per job) meant reconnecting for every search; the driver pools
+# connections itself and creates a fresh session per query, which is the
+# thread-safe way to use it.
+_retriever: Optional[ManimRetriever] = None
+_retriever_lock = threading.Lock()
+
+
+def get_retriever() -> ManimRetriever:
+    """Return the process-wide retriever, creating it on first use."""
+    global _retriever
+    if _retriever is None:
+        with _retriever_lock:
+            if _retriever is None:
+                _retriever = ManimRetriever()
+    return _retriever
+
+
+def close_retriever() -> None:
+    """Close the process-wide retriever, if one was created."""
+    global _retriever
+    with _retriever_lock:
+        if _retriever is not None:
+            _retriever.close()
+            _retriever = None
