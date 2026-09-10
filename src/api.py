@@ -239,27 +239,30 @@ async def download_video(job_id: str):
 
 @app.get("/search")
 async def search_examples(query: str, limit: int = 5):
-    """Search for similar Manim examples."""
-    from .graph_rag.retriever import ManimRetriever
+    """Search for similar Manim examples.
 
-    retriever = ManimRetriever()
-    try:
-        results = retriever.hybrid_search(query=query, limit=limit)
-        return {
-            "query": query,
-            "results": [
-                {
-                    "id": r.example_id,
-                    "prompt": r.prompt[:200],
-                    "score": r.score,
-                    "classes": r.used_classes,
-                    "animations": r.used_animations,
-                }
-                for r in results
-            ],
-        }
-    finally:
-        retriever.close()
+    hybrid_search is blocking Neo4j and ChromaDB I/O, so it runs in a worker
+    thread: running it inline stalled the whole event loop — including job
+    status polling and /health — for the length of the round trip.
+    """
+    from .graph_rag.retriever import get_retriever
+
+    results = await asyncio.to_thread(
+        lambda: get_retriever().hybrid_search(query=query, limit=limit)
+    )
+    return {
+        "query": query,
+        "results": [
+            {
+                "id": r.example_id,
+                "prompt": r.prompt[:200],
+                "score": r.score,
+                "classes": r.used_classes,
+                "animations": r.used_animations,
+            }
+            for r in results
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------

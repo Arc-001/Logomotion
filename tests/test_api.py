@@ -190,3 +190,46 @@ class TestJobTimeout:
 
         assert job.status == "completed"
         assert job.video_path == "/tmp/out.mp4"
+
+
+class TestSearchEndpoint:
+    """hybrid_search is blocking Neo4j/Chroma I/O; running it inline stalled
+    every other request for the length of the round trip."""
+
+    def test_search_runs_off_the_event_loop(self, client, monkeypatch):
+        import src.graph_rag.retriever as retriever_module
+
+        threads = []
+
+        class _Fake:
+            def hybrid_search(self, query, limit=5):
+                import threading
+                threads.append(threading.current_thread().name)
+                return []
+
+        monkeypatch.setattr(retriever_module, "get_retriever", lambda: _Fake())
+
+        response = client.get("/search?query=circle")
+
+        assert response.status_code == 200
+        assert threads and threads[0] != "MainThread"
+
+    def test_search_serialises_results(self, client, monkeypatch):
+        import src.graph_rag.retriever as retriever_module
+        from src.graph_rag.retriever import RetrievalResult
+
+        class _Fake:
+            def hybrid_search(self, query, limit=5):
+                return [RetrievalResult(
+                    example_id="e1", prompt="p" * 300, code="c", score=0.5,
+                    used_classes=["Circle"], used_animations=["Create"],
+                )]
+
+        monkeypatch.setattr(retriever_module, "get_retriever", lambda: _Fake())
+
+        body = client.get("/search?query=circle").json()
+
+        assert body["query"] == "circle"
+        assert body["results"][0]["id"] == "e1"
+        assert len(body["results"][0]["prompt"]) == 200
+        assert body["results"][0]["classes"] == ["Circle"]

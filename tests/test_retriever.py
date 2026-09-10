@@ -146,3 +146,45 @@ class TestHybridSearchCurationGate:
         retriever.get_example_details = lambda id_: None if id_ == "gone" else _result(id_)
 
         assert [r.example_id for r in retriever.hybrid_search("q", limit=5)] == ["ce"]
+
+
+class TestProcessWideRetriever:
+    def test_get_retriever_returns_the_same_instance(self, monkeypatch):
+        import src.graph_rag.retriever as module
+
+        created = []
+
+        class _Fake:
+            def __init__(self):
+                created.append(self)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(module, "ManimRetriever", _Fake)
+        monkeypatch.setattr(module, "_retriever", None)
+
+        first = module.get_retriever()
+        second = module.get_retriever()
+
+        assert first is second
+        assert len(created) == 1
+        module.close_retriever()
+
+    def test_close_retriever_closes_and_forgets_it(self, monkeypatch):
+        import src.graph_rag.retriever as module
+
+        closed = []
+
+        class _Fake:
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(module, "ManimRetriever", _Fake)
+        monkeypatch.setattr(module, "_retriever", None)
+
+        module.get_retriever()
+        module.close_retriever()
+
+        assert closed == [True]
+        assert module._retriever is None

@@ -537,10 +537,10 @@ def video_code_gen_node(state: VideoGenState) -> dict:
     Input: system_message, scene_title, scene_prompt_description
     Output: code, transcript, retrieved_examples, retrieved_context
     """
-    from ..graph_rag.retriever import ManimRetriever  # deferred: pulls in DB drivers
+    from ..graph_rag.retriever import get_retriever  # deferred: pulls in DB drivers
 
     warnings: list[str] = []
-    retriever = ManimRetriever()
+    retriever = get_retriever()
 
     class_hints, animation_hints = _extract_rag_hints(
         f"{state['scene_title']} {state['scene_prompt_description']}"
@@ -574,8 +574,6 @@ Used animations: {', '.join(result.used_animations)}
         example_ids = []
         retrieved_context = f"RAG retrieval failed: {e}"
         warnings.append(f"RAG retrieval failed, generating without examples: {e}")
-    finally:
-        retriever.close()
 
     # narration_tts_node rewrites target_duration to the measured speech
     # timeline, so prefer it over the raw requested length.

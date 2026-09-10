@@ -4,7 +4,7 @@ Tests for src.agent.nodes.
 These tests run with no live Neo4j/Chroma databases, no network access,
 and no OPENROUTER_API_KEY: every LLM call goes through a monkeypatched
 `llm_chat`, and the Graph RAG retriever is replaced with an in-memory stub
-patched at its source module (`src.graph_rag.retriever.ManimRetriever`),
+patched at its source module (`src.graph_rag.retriever.get_retriever`),
 matching how `video_code_gen_node` imports it lazily inside the function.
 """
 
@@ -123,7 +123,7 @@ class TestVideoCodeGenNode:
             "src.agent.nodes.llm_chat",
             lambda messages, temperature=0.2: CANNED_RESPONSE,
         )
-        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _EmptyRetriever())
 
         result = video_code_gen_node(_base_state())
 
@@ -141,7 +141,7 @@ class TestVideoCodeGenNode:
         monkeypatch.setattr(
             "src.agent.nodes.llm_chat", lambda messages, temperature=0.2: response
         )
-        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _EmptyRetriever())
 
         result = video_code_gen_node(_base_state())
 
@@ -152,7 +152,7 @@ class TestVideoCodeGenNode:
         monkeypatch.setattr(
             "src.agent.nodes.llm_chat", lambda messages, temperature=0.2: None
         )
-        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _EmptyRetriever())
 
         state = _base_state(scene_title="Fallback Title")
         result = video_code_gen_node(state)
@@ -166,7 +166,7 @@ class TestVideoCodeGenNode:
             "src.agent.nodes.llm_chat",
             lambda messages, temperature=0.2: CANNED_RESPONSE,
         )
-        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _RaisingRetriever)
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _RaisingRetriever())
 
         result = video_code_gen_node(_base_state())
 
@@ -180,7 +180,7 @@ class TestVideoCodeGenNode:
             "src.agent.nodes.llm_chat",
             lambda messages, temperature=0.2: CANNED_RESPONSE,
         )
-        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _EmptyRetriever())
 
         state = _base_state(
             explanation_depth="comprehensive",
@@ -594,7 +594,7 @@ class TestStoryboardPromptInjection:
             captured["prompt"] = messages[1]["content"]
             return None  # fall back to stub scene; we only care about the prompt
 
-        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _EmptyRetriever())
         monkeypatch.setattr(nodes, "llm_chat", fake_llm)
 
         state = _base_state()
@@ -920,7 +920,7 @@ class TestPreRecordedNarrationPrompt:
             captured["prompt"] = messages[1]["content"]
             return "```python\nfrom manim import *\n\nclass S(Scene):\n    def construct(self):\n        pass\n```"
 
-        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _EmptyRetriever())
         monkeypatch.setattr(nodes, "llm_chat", fake_llm)
         result = nodes.video_code_gen_node(state)
         return captured["prompt"], result
@@ -1072,7 +1072,7 @@ class TestCoordinateSystemGuidance:
             captured["user"] = messages[1]["content"]
             return None
 
-        monkeypatch.setattr("src.graph_rag.retriever.ManimRetriever", _EmptyRetriever)
+        monkeypatch.setattr("src.graph_rag.retriever.get_retriever", lambda: _EmptyRetriever())
         monkeypatch.setattr(nodes, "llm_chat", fake_llm)
         nodes.video_code_gen_node(_base_state())
         return captured

@@ -6,6 +6,7 @@ to find the most relevant Manim code examples.
 """
 
 import re
+import threading
 from typing import Optional
 from dataclasses import dataclass
 
@@ -270,3 +271,30 @@ class ManimRetriever(GraphRAGClients):
                 "description": record["description"],
                 "example_count": record["example_count"],
             }
+
+
+# One retriever per process. Opening a Neo4j driver and a ChromaDB client per
+# request (or per job) meant reconnecting for every search; the driver pools
+# connections itself and creates a fresh session per query, which is the
+# thread-safe way to use it.
+_retriever: Optional[ManimRetriever] = None
+_retriever_lock = threading.Lock()
+
+
+def get_retriever() -> ManimRetriever:
+    """Return the process-wide retriever, creating it on first use."""
+    global _retriever
+    if _retriever is None:
+        with _retriever_lock:
+            if _retriever is None:
+                _retriever = ManimRetriever()
+    return _retriever
+
+
+def close_retriever() -> None:
+    """Close the process-wide retriever, if one was created."""
+    global _retriever
+    with _retriever_lock:
+        if _retriever is not None:
+            _retriever.close()
+            _retriever = None
