@@ -391,6 +391,142 @@ Rules:
 
 
 # ============================================================================
+# NODE 0c: Narration TTS (synthesise and MEASURE narration before code exists)
+# ============================================================================
+
+# Breathing room appended to each section on top of its spoken audio, so the
+# animation does not cut over the last syllable.
+_SECTION_PADDING = 1.0
+
+# How far the narration-driven total may drift from the requested length
+# before the user is told the video grew or shrank to fit the speech.
+_NARRATION_DRIFT_TOLERANCE = 0.15
+
+
+def _get_tts():
+    """Return the process-wide Kokoro instance, or None when unavailable.
+
+    Uses the module-level singleton so the 82M ONNX model is loaded once per
+    process instead of once per job.
+    """
+    try:
+        from ..tts import get_tts, KOKORO_AVAILABLE
+    except ImportError as e:
+        print(f"[TTS] WARNING: Could not import TTS module: {e}")
+        return None
+
+    if not KOKORO_AVAILABLE:
+        print("[TTS] WARNING: Kokoro not available (kokoro-onnx not installed)")
+        return None
+
+    try:
+        return get_tts(voice="af_bella")
+    except Exception as e:
+        print(f"[TTS] WARNING: Could not initialise Kokoro: {e}")
+        return None
+
+
+def narration_tts_node(state: VideoGenState) -> dict:
+    """
+    Record the storyboard narration first, then time the video to it.
+
+    The transcript is derived from the storyboard rather than invented by the
+    code generator, and every section's budget is the *measured* length of its
+    audio. Downstream, the code generator is handed real seconds to fill, so
+    narration and animation cannot drift apart.
+
+    Input:  storyboard
+    Output: narration_segments, transcript_sections, audio_segments,
+            storyboard (with real budgets), target_duration
+    """
+    storyboard = state.get("storyboard")
+    if not storyboard:
+        # No plan to narrate — the single-shot path handles TTS itself.
+        return {}
+
+    tts = _get_tts()
+    if tts is None:
+        return {
+            "pipeline_warnings": [
+                "Narration could not be recorded up front (TTS unavailable); "
+                "falling back to timestamps estimated by the model"
+            ],
+        }
+
+    requested_duration = state.get("target_duration") or state["scene_length"] * 60.0
+    print(f"[NARRATION] Recording {len(storyboard)} section(s) before code generation")
+
+    segments: list[dict] = []
+    sections: list[TranscriptSection] = []
+    audio_segments: list[str] = []
+    planned: list[dict] = []
+    warnings: list[str] = []
+
+    cursor = 0.0
+    for i, section in enumerate(storyboard):
+        text = str(section.get("narration", "")).strip()
+        audio_path = None
+        audio_duration = 0.0
+
+        if text:
+            result = tts.synthesize(text)
+            if result.success and result.duration:
+                audio_path = result.audio_path
+                audio_duration = float(result.duration)
+                audio_segments.append(audio_path)
+                print(f"[NARRATION]   {i + 1}. {section.get('title', '')!r}: "
+                      f"{audio_duration:.1f}s of speech")
+            else:
+                print(f"[NARRATION]   {i + 1}. synthesis failed: {result.error}")
+                warnings.append(
+                    f"Narration for section {i + 1} could not be synthesised: {result.error}"
+                )
+
+        # The section must be at least long enough to say its own line.
+        budget = max(float(section.get("duration_seconds", 0.0)), audio_duration + _SECTION_PADDING)
+
+        planned.append({**section, "duration_seconds": round(budget, 2)})
+        segments.append({
+            "index": i,
+            "text": text,
+            "audio_path": audio_path,
+            "audio_duration": round(audio_duration, 3),
+            "timestamp": round(cursor, 3),
+        })
+        if text:
+            sections.append(TranscriptSection(
+                timestamp=round(cursor, 3),
+                text=text,
+                audio_path=audio_path,
+            ))
+
+        cursor += budget
+
+    total = round(cursor, 2)
+    print(f"[NARRATION] Timeline: {total:.1f}s across {len(planned)} sections "
+          f"(requested {requested_duration:.1f}s)")
+
+    if requested_duration > 0:
+        drift = abs(total - requested_duration) / requested_duration
+        if drift > _NARRATION_DRIFT_TOLERANCE:
+            direction = "longer" if total > requested_duration else "shorter"
+            warnings.append(
+                f"Video timed to the narration: {total:.0f}s, "
+                f"{drift * 100:.0f}% {direction} than the requested {requested_duration:.0f}s"
+            )
+
+    return {
+        "storyboard": planned,
+        "narration_segments": segments,
+        "transcript_sections": sections,
+        "audio_segments": audio_segments,
+        "transcript": {seg["timestamp"]: seg["text"] for seg in segments if seg["text"]},
+        "target_duration": total,
+        "pipeline_warnings": warnings,
+    }
+
+
+# ============================================================================
 # NODE 1: Video Code Generator (with Graph RAG)
 # ============================================================================
 
@@ -811,9 +947,16 @@ def transcript_processor_node(state: VideoGenState) -> dict:
 
     Uses Kokoro 82M local model for high-quality speech synthesis.
 
+    No-op when ``narration_tts_node`` already recorded the narration from the
+    storyboard: that path owns the timeline and this one would duplicate it.
+
     Input: transcript dict
     Output: transcript_sections list, audio_segments list
     """
+    if state.get("narration_segments"):
+        print("[TTS] Narration already recorded from the storyboard, skipping")
+        return {}
+
     sections = []
     audio_segments = []
     transcript = state.get("transcript", {})
@@ -822,16 +965,7 @@ def transcript_processor_node(state: VideoGenState) -> dict:
 
     print(f"[TTS] Processing {len(sorted_items)} transcript segments...")
 
-    tts = None
-    try:
-        from ..tts import KokoroTTS, KOKORO_AVAILABLE
-        if KOKORO_AVAILABLE:
-            tts = KokoroTTS(voice="af_bella")
-            print("[TTS] Kokoro TTS initialized successfully")
-        else:
-            print("[TTS] WARNING: Kokoro not available (kokoro-onnx not installed)")
-    except ImportError as e:
-        print(f"[TTS] WARNING: Could not import TTS module: {e}")
+    tts = _get_tts()
 
     for i, (timestamp, text) in enumerate(sorted_items):
         audio_path = None

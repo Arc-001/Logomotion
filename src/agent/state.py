@@ -68,6 +68,11 @@ class VideoGenState(TypedDict):
     storyboard_enabled: bool
     storyboard: Optional[list[dict]]  # [{title, duration_seconds, visuals, narration}]
 
+    # Narration synthesised up front, before any code exists. Each entry is
+    # {index, text, audio_path, audio_duration, timestamp} with a MEASURED
+    # duration, so section time budgets are real seconds rather than guesses.
+    narration_segments: list[dict]
+
     retrieved_examples: list[str]  # Code examples from Graph RAG
     retrieved_context: str  # Formatted context for LLM
     
@@ -215,6 +220,7 @@ def create_initial_state(
 
         storyboard_enabled=storyboard_enabled,
         storyboard=None,
+        narration_segments=[],
 
         retrieved_examples=[],
         retrieved_context="",

@@ -750,3 +750,157 @@ class TestVisualRecorrectorNode:
         assert "code" not in result  # state code untouched
         assert result["visual_fix_count"] == 1
         assert any("fix failed" in w for w in result["pipeline_warnings"])
+
+
+# ============================================================================
+# narration_tts_node — narration is recorded and measured before code exists
+# ============================================================================
+
+class _StubTTSResult:
+    def __init__(self, duration, path="/tmp/kokoro_stub.wav", error=None):
+        self.success = error is None
+        self.audio_path = None if error else path
+        self.duration = duration
+        self.error = error
+
+
+class _StubTTS:
+    """Kokoro stand-in: speech length is proportional to the text length."""
+
+    def __init__(self, seconds_per_char=0.1, fail_on=()):
+        self.seconds_per_char = seconds_per_char
+        self.fail_on = fail_on
+        self.calls = []
+
+    def synthesize(self, text):
+        self.calls.append(text)
+        if text in self.fail_on:
+            return _StubTTSResult(None, error="synthesis exploded")
+        return _StubTTSResult(
+            duration=len(text) * self.seconds_per_char,
+            path=f"/tmp/kokoro_{len(self.calls):03d}.wav",
+        )
+
+
+class TestNarrationTtsNode:
+    def _state(self, storyboard, **overrides):
+        state = {
+            "scene_length": 1.0,
+            "target_duration": 60.0,
+            "storyboard": storyboard,
+        }
+        state.update(overrides)
+        return state
+
+    def _storyboard(self):
+        return [
+            {"title": "Intro", "duration_seconds": 10, "visuals": "v", "narration": "a" * 20},
+            {"title": "Body", "duration_seconds": 30, "visuals": "v", "narration": "b" * 50},
+            {"title": "Wrap", "duration_seconds": 20, "visuals": "v", "narration": "c" * 10},
+        ]
+
+    def test_section_budget_is_at_least_the_measured_speech(self, monkeypatch):
+        from src.agent import nodes
+
+        # 50 chars * 0.1 = 5.0s of speech, well under the 30s plan
+        monkeypatch.setattr(nodes, "_get_tts", lambda: _StubTTS())
+        result = nodes.narration_tts_node(self._state(self._storyboard()))
+
+        for section, segment in zip(result["storyboard"], result["narration_segments"]):
+            assert section["duration_seconds"] >= segment["audio_duration"]
+
+    def test_budget_grows_when_speech_overruns_the_plan(self, monkeypatch):
+        from src.agent import nodes
+
+        # 0.5s/char makes the 50-char middle section 25s of speech vs a 10s plan
+        monkeypatch.setattr(nodes, "_get_tts", lambda: _StubTTS(seconds_per_char=0.5))
+        storyboard = [
+            {"title": "Only", "duration_seconds": 10, "visuals": "v", "narration": "b" * 50},
+        ]
+        result = nodes.narration_tts_node(self._state(storyboard))
+
+        assert result["storyboard"][0]["duration_seconds"] == pytest.approx(26.0)
+        assert result["target_duration"] == pytest.approx(26.0)
+
+    def test_timestamps_are_cumulative_section_starts(self, monkeypatch):
+        from src.agent import nodes
+
+        monkeypatch.setattr(nodes, "_get_tts", lambda: _StubTTS())
+        result = nodes.narration_tts_node(self._state(self._storyboard()))
+
+        starts = [seg["timestamp"] for seg in result["narration_segments"]]
+        assert starts == [0.0, 10.0, 40.0]
+
+        sections = result["transcript_sections"]
+        assert [s["timestamp"] for s in sections] == starts
+        assert all(s["audio_path"] for s in sections)
+
+    def test_target_duration_is_the_sum_of_budgets(self, monkeypatch):
+        from src.agent import nodes
+
+        monkeypatch.setattr(nodes, "_get_tts", lambda: _StubTTS())
+        result = nodes.narration_tts_node(self._state(self._storyboard()))
+
+        assert result["target_duration"] == pytest.approx(60.0)
+
+    def test_warns_when_narration_stretches_the_video(self, monkeypatch):
+        from src.agent import nodes
+
+        monkeypatch.setattr(nodes, "_get_tts", lambda: _StubTTS(seconds_per_char=1.0))
+        result = nodes.narration_tts_node(self._state(self._storyboard()))
+
+        assert result["target_duration"] > 60.0
+        assert any("timed to the narration" in w for w in result["pipeline_warnings"])
+
+    def test_failed_segment_is_warned_and_skipped(self, monkeypatch):
+        from src.agent import nodes
+
+        storyboard = self._storyboard()
+        monkeypatch.setattr(
+            nodes, "_get_tts", lambda: _StubTTS(fail_on=(storyboard[1]["narration"],))
+        )
+        result = nodes.narration_tts_node(self._state(storyboard))
+
+        assert result["narration_segments"][1]["audio_path"] is None
+        assert len(result["audio_segments"]) == 2
+        assert any("section 2" in w for w in result["pipeline_warnings"])
+
+    def test_no_storyboard_is_a_no_op(self, monkeypatch):
+        from src.agent import nodes
+
+        monkeypatch.setattr(nodes, "_get_tts", lambda: _StubTTS())
+        assert nodes.narration_tts_node(self._state(None)) == {}
+
+    def test_tts_unavailable_falls_back_with_a_warning(self, monkeypatch):
+        from src.agent import nodes
+
+        monkeypatch.setattr(nodes, "_get_tts", lambda: None)
+        result = nodes.narration_tts_node(self._state(self._storyboard()))
+
+        assert "narration_segments" not in result
+        assert any("TTS unavailable" in w for w in result["pipeline_warnings"])
+
+
+class TestTranscriptProcessorSkipsPreRecordedNarration:
+    def test_no_op_when_narration_already_recorded(self, monkeypatch):
+        from src.agent import nodes
+
+        def _boom():
+            raise AssertionError("_get_tts must not be called")
+
+        monkeypatch.setattr(nodes, "_get_tts", _boom)
+        state = {
+            "narration_segments": [{"index": 0, "text": "hi", "audio_path": "/tmp/a.wav"}],
+            "transcript": {0: "hi"},
+        }
+        assert nodes.transcript_processor_node(state) == {}
+
+    def test_still_runs_on_the_single_shot_path(self, monkeypatch):
+        from src.agent import nodes
+
+        monkeypatch.setattr(nodes, "_get_tts", lambda: _StubTTS())
+        state = {"narration_segments": [], "transcript": {0: "hello", 5: "world"}}
+        result = nodes.transcript_processor_node(state)
+
+        assert [s["timestamp"] for s in result["transcript_sections"]] == [0.0, 5.0]
+        assert len(result["audio_segments"]) == 2
